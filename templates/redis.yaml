@@ -1,0 +1,34 @@
+# 长驻服务模板：redis
+# 需要预装 redis 的 rootfs（在 /opt/berth/rootfs 基础上 chroot 安装 redis-server）
+name: redis
+image_rootfs: /opt/berth/rootfs-redis
+command: ["/usr/bin/redis-server"]
+# {port} 会被替换成分配到的宿主端口（host 网络模式下直接监听宿主端口）
+args:
+  - "--port"
+  - "{port}"
+  - "--bind"
+  - "0.0.0.0"
+  - "--protected-mode"
+  - "no"
+  - "--dir"
+  - "/var/lib/redis"
+  - "--appendonly"
+  - "yes"
+  - "--daemonize"
+  - "no"
+env: {}
+ports:
+  - internal: 6379
+    external_range: [16379, 16479]
+volumes:
+  - internal: /var/lib/redis
+    persist: true
+healthcheck:
+  type: tcp
+  port: 6379
+  timeout: 20
+  interval: 0.3
+resources:
+  memory_mb: 512
+  cpu_percent: 100

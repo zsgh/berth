@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# 运行数据（真实数据在 /var/lib/sandbox-daemon，这里防误提交）
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 本地评测输出
+eval_results_*.json
