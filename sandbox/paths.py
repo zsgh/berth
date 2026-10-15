@@ -31,22 +31,25 @@ SANDBOX_GID = 1000
 
 
 def sudo(*args, check: bool = True) -> subprocess.CompletedProcess:
-    """以 root 执行一条命令（sudo -n，无交互）。"""
-    res = subprocess.run(
-        ["sudo", "-n", *[str(a) for a in args]],
-        capture_output=True,
-        text=True,
-    )
+    """以 root 执行一条命令。
+
+    - 已经是 root（euid==0）：直接执行（某些最小系统没有 sudo）
+    - 普通用户：走 `sudo -n`（需要免密 sudo，见 README）
+    """
+    cmd = [str(a) for a in args]
+    argv = cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
+    res = subprocess.run(argv, capture_output=True, text=True)
     if check and res.returncode != 0:
         raise RuntimeError(
-            f"sudo {' '.join(map(str, args))} failed: rc={res.returncode}\n{res.stderr}"
+            f"{' '.join(argv)} failed: rc={res.returncode}\n{res.stderr}"
         )
     return res
 
 
 def ensure_base_dir() -> None:
-    """确保 BASE_DIR 存在且归当前用户所有。"""
+    """确保 BASE_DIR 存在；非 root 模式下归当前用户所有。"""
     if BASE_DIR.exists():
         return
     sudo("mkdir", "-p", BASE_DIR)
-    sudo("chown", f"{os.getuid()}:{os.getgid()}", BASE_DIR)
+    if os.geteuid() != 0:
+        sudo("chown", f"{os.getuid()}:{os.getgid()}", BASE_DIR)

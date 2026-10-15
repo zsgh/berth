@@ -15,7 +15,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sandbox.paths import BASE_DIR
+from sandbox.paths import BASE_DIR, ensure_base_dir
 
 DB_PATH = Path(os.environ.get("BERTH_DB", str(BASE_DIR / "daemon.db")))
 
@@ -77,7 +77,14 @@ _SCHEMA_READY = False
 def connect() -> sqlite3.Connection:
     """打开连接（行工厂 + WAL，适合多线程/多进程访问）。表结构懒建。"""
     global _SCHEMA_READY
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not DB_PATH.parent.exists():
+        try:
+            # 常规情况：数据目录归当前用户
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # 首次运行且是「普通用户 + sudo」模式：/var/lib/berth 需要 root 建
+            ensure_base_dir()
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

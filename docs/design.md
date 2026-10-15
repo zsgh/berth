@@ -148,7 +148,23 @@ daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is
 - 因为 FastAPI 原生遥测 + agent 侧 OpenAI instrumentor，Phoenix 里能看到
   HTTP → agent → sandbox 的完整链路
 
-## 6. 数据模型（SQLite）
+## 6. 运行模式与镜像（部署视角）
+
+**镜像从哪来**：`scripts/setup_rootfs.sh` 用 debootstrap 构建（默认 `/opt/berth/rootfs`，
+含 python3 / ca-certificates / util-linux），redis 镜像 = 基础镜像 + chroot 里装 redis-server。
+镜像是普通目录，berth 只当作 overlayfs 只读下层用，升级镜像就换目录（`BERTH_ROOTFS` 指过去即可）。
+
+**进程权限**：沙箱构造需要 root 级操作（mount/overlay/pivot_root/systemd-run/chown），berth 支持两种跑法：
+
+- **root 模式**：直接以 root 起 daemon（`sudo uvicorn server:app ...`）。
+  `sandbox/paths.py: sudo()` 检测到 euid==0 时直接执行，不走 sudo（最小系统没装 sudo 也能用）。
+- **免密 sudo 模式**：普通用户 + `NOPASSWD`，`sudo -n` 执行特权命令。
+  注意：运行数据目录（默认 `/var/lib/berth`）首次由 root 创建后归运行用户。
+
+**数据目录首次创建**：`state/db.py` 打开 DB 前若目录不存在，先按当前用户 mkdir；
+失败（非 root 且 /var/lib 受限）则回退 `ensure_base_dir()` 用 sudo 建。
+
+## 7. 数据模型（SQLite）
 
 ```sql
 runs(task_id PK, code, stdout, stderr, exit_code, duration_ms, artifacts JSON,

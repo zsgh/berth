@@ -29,6 +29,21 @@ class _NullSpan:
         pass
 
 
+def _reachable(endpoint: str) -> bool:
+    """端点能不能连（Phoenix 没起时不要反复刷导出错误）。"""
+    import socket
+    from urllib.parse import urlparse
+
+    u = urlparse(endpoint)
+    host = u.hostname or "localhost"
+    port = u.port or (443 if u.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def _init() -> None:
     global _tracer, _initialized
     if _initialized:
@@ -46,6 +61,9 @@ def _init() -> None:
 
         project = os.environ.get("BERTH_PHOENIX_PROJECT", "berth")
         endpoint = os.environ.get("BERTH_PHOENIX_ENDPOINT", "http://localhost:6006/v1/traces")
+        if not _reachable(endpoint):
+            log.info("tracing 端点不可达（%s），跳过上报（设 BERTH_TRACING=0 可静默）", endpoint)
+            return
         provider = TracerProvider(
             resource=Resource.create(
                 {
