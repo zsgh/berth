@@ -104,7 +104,17 @@ curl -s "http://localhost:9000/scripts?limit=10"
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `template` | string | 模板名，如 `redis` |
-| `name` | string? | 人类可读的服务名 |
+| `name` | string? | 服务名（同名幂等，见下） |
+
+**同名幂等（ensure 语义）** —— 重复调用永远不会重复创建：
+
+| 情况 | 行为 |
+|---|---|
+| 名字不存在 | 新建，响应 `"reused": false` |
+| 同名且已在运行 | 直接返回现有实例，`"reused": true`（不新建、不重启） |
+| 同名但已停止/掉线 | 原样再起，复用数据卷，`"reused": true` |
+| 同名但模板不同 | `409`（换个名字，或先 DELETE） |
+| 不传 `name` | 每次新建匿名实例（名字自动取 service_id） |
 
 **响应**
 
@@ -120,12 +130,13 @@ curl -s "http://localhost:9000/scripts?limit=10"
   "status": "running",
   "dir": "/var/lib/berth/services/svc-16b83efe",
   "persist": 1,
+  "reused": false,
   "created_at": "...",
   "updated_at": "..."
 }
 ```
 
-错误：`400` 模板不存在/缺字段；`504` 健康检查超时（服务会被自动清理）。
+错误：`400` 模板不存在/缺字段；`409` 同名冲突；`504` 健康检查超时（服务会被自动清理）。
 
 ### `GET /services`
 

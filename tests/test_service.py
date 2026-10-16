@@ -24,6 +24,8 @@ TPL_DIR = TEST_HOME / "templates"
 TPL_DIR.mkdir(parents=True)
 src = (Path(__file__).resolve().parent.parent / "templates" / "redis.yaml").read_text()
 (TPL_DIR / "redis.yaml").write_text(src.replace("[16379, 16479]", "[26379, 26479]"))
+# 第二个模板（内容相同、文件名不同）用于测「同名不同模板 → 冲突」
+(TPL_DIR / "redis-alt.yaml").write_text(src.replace("[16379, 16479]", "[26479, 26579]"))
 os.environ["BERTH_TEMPLATES_DIR"] = str(TPL_DIR)
 
 from sandbox.network import get_port  # noqa: E402
@@ -106,6 +108,38 @@ def main():
     assert svc3["port"] == 26379, svc3
     assert redis_ping(26379) == "PONG"
     stop_service(svc3["service_id"])
+
+    print("=== 同名幂等（ensure 语义，防止重复创建） ===")
+    a = start_service("redis", "ensure-me")
+    b = start_service("redis", "ensure-me")
+    print("两次同名请求 →", a["service_id"], "/", b["service_id"], "| reused:", b["reused"])
+    assert a["service_id"] == b["service_id"], "同名请求不应重复创建"
+    assert b["reused"] is True and b["status"] == "running"
+    subprocess.run(
+        ["redis-cli", "-h", "localhost", "-p", str(b["port"]), "set", "keep", "yes"],
+        check=True, timeout=10,
+    )
+
+    # 停止后再同名请求 → 复用同一个 id，数据卷保留
+    stop_service(a["service_id"])
+    c = start_service("redis", "ensure-me")
+    assert c["service_id"] == a["service_id"] and c["reused"] is True, c
+    got = subprocess.run(
+        ["redis-cli", "-h", "localhost", "-p", str(c["port"]), "get", "keep"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    assert got == "yes", "复用实例后数据应保留"
+    stop_service(c["service_id"])
+
+    # 同名 + 不同模板 → 冲突（409 语义）
+    from sandbox.service import ServiceConflictError
+
+    try:
+        start_service("redis-alt", "ensure-me")
+        raise AssertionError("应当报同名冲突")
+    except ServiceConflictError as e:
+        print("同名冲突 OK:", str(e)[:70], "...")
+    print("✔ ensure 语义通过")
 
     print("全部通过 ✔")
 

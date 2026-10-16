@@ -83,6 +83,10 @@ setpriv --reuid=1000 --regid=1000 --clear-groups \
 5. 健康检查（TCP 连接宿主端口，重试到超时）
 6. 记录 SQLite（`status=running`）
 
+**同名幂等**：`POST /services` 带 `name` 时按名字查现有实例——
+在跑就直接返回（`reused=true`）、停了就原样再起（复用数据卷）、模板不同报 409。
+名字即身份，重复调用不会重复创建实例（agent 重试友好）。
+
 停止（`stop_service()`）：
 
 1. `stop_unit()`：限时优雅 stop → 超时/没死就 `systemctl kill -s SIGKILL`（整个 cgroup）→ `reset-failed`

@@ -188,6 +188,16 @@ def get_service_row(service_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def find_service_by_name(name: str) -> dict | None:
+    """按名字找最近的实例（同名多历史时取最新一条）。"""
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM services WHERE name=? ORDER BY created_at DESC LIMIT 1", (name,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def list_service_rows(status: str | None = None) -> list[dict]:
     conn = connect()
     if status:

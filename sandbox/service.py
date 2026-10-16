@@ -220,17 +220,52 @@ def _start_unit(unit: str, inner: str, tpl: dict) -> None:
         raise RuntimeError(f"systemd-run 启动失败: {res.stderr.strip() or res.stdout.strip()}")
 
 
-def start_service(template: str, name: str | None = None, timeout: float | None = None) -> dict:
-    """按模板启动一个长驻服务（带 Phoenix trace 埋点）。
+class ServiceConflictError(ValueError):
+    """同名服务冲突（名字已被不同模板的实例占用）。API 层会映射成 409。"""
 
-    返回: {service_id, name, template, host, port, internal_port, status, unit, created_at}
+
+def _latest_by_name(name: str) -> dict | None:
+    """按名字找最近的实例（刷新过状态）。"""
+    from state.db import find_service_by_name
+
+    row = find_service_by_name(name)
+    return _refresh_row(row) if row else None
+
+
+def start_service(template: str, name: str | None = None, timeout: float | None = None) -> dict:
+    """启动服务。**同名幂等（ensure 语义）**，当传入 name 时：
+
+    - 名字不存在              → 新建
+    - 同名且已在运行          → 直接返回现有实例（reused=true），绝不重复创建
+    - 同名但已停止/掉线       → 原样再起，复用数据卷（reused=true）
+    - 同名但模板不同          → ServiceConflictError（409）
+
+    不传 name → 每次新建匿名实例（名字自动取 service_id）。
     """
+    name = (name or "").strip() or None
+
+    if name:
+        existing = _latest_by_name(name)
+        if existing:
+            if existing["template"] != template:
+                raise ServiceConflictError(
+                    f"名字 {name!r} 已被 {existing['service_id']} 占用"
+                    f"（template={existing['template']}，status={existing['status']}）；"
+                    f"换个名字，或先 DELETE /services/{existing['service_id']}"
+                )
+            if existing["status"] in ACTIVE_STATUSES and unit_active(existing["unit"]):
+                log.info("同名服务已在运行，直接返回: %s (%s)", existing["service_id"], name)
+                return dict(existing, reused=True)
+            # 已停止 / 掉线：原样再起（保留数据卷）
+            log.info("同名服务已存在（%s），原样再起: %s", existing["status"], existing["service_id"])
+            return dict(start_existing_service(existing["service_id"], timeout), reused=True)
+
     with span("service.start", template=template, name=name or "") as s:
         svc = _start_service_impl(template, name=name, timeout=timeout)
         s.set_attribute("service_id", svc["service_id"])
         s.set_attribute("port", svc["port"])
         s.set_attribute("status", svc["status"])
-        return svc
+        return dict(svc, reused=False)
 
 
 def _start_service_impl(

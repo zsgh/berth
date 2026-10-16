@@ -29,6 +29,7 @@ from sandbox.overlayfs import run_script
 from sandbox.paths import BASE_DIR
 from sandbox.paths import sudo as sudo_rm
 from sandbox.service import (
+    ServiceConflictError,
     cleanup_orphans,
     get_service,
     list_services,
@@ -111,9 +112,15 @@ def scripts_clear(task_id: str) -> dict:
 
 @app.post("/services")
 def services_start(req: ServiceRequest) -> dict:
-    """按模板启动一个长驻服务（systemd 托管）。"""
+    """按模板启动一个长驻服务（systemd 托管）。
+
+    同名幂等：带 name 时，重复调用不会重复创建 —— 已在运行直接返回现有实例，
+    已停止则原样再起（复用数据卷）；名字被不同模板占用时返回 409。
+    """
     try:
         return start_service(req.template, req.name)
+    except ServiceConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError as e:

@@ -133,7 +133,7 @@ mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 | 想做的事 | berth |
 |---|---|
 | `docker run image cmd` | `POST /scripts/run` `{"code": "..."}`（跑完即走，自动清理） |
-| `docker run -d redis` | `POST /services` `{"template": "redis"}`（systemd 托管，返回端口） |
+| `docker run -d redis` | `POST /services` `{"template": "redis", "name": "my-redis"}`（同名幂等：重复调用不会重复创建，已停止则原样再起） |
 | `docker ps` | `GET /services`（默认只列活跃服务） |
 | `docker ps -a` | `GET /services?all=true`（含 stopped/crashed 历史） |
 | `docker stop` | `DELETE /services/{id}` |
