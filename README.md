@@ -112,8 +112,10 @@ curl -s -X DELETE http://localhost:9000/services/svc-xxx   # 停止并清理
 |---|---|
 | `docker run image cmd` | `POST /scripts/run` `{"code": "..."}`（跑完即走，自动清理） |
 | `docker run -d redis` | `POST /services` `{"template": "redis"}`（systemd 托管，返回端口） |
-| `docker ps` | `GET /services` |
+| `docker ps` | `GET /services`（默认只列活跃服务） |
+| `docker ps -a` | `GET /services?all=true`（含 stopped/crashed 历史） |
 | `docker stop` | `DELETE /services/{id}` |
+| `docker rm` | `DELETE /services/{id}?purge=true`（连记录一起删） |
 | `docker logs` | `journalctl -u berth-svc-{id}.service` |
 | `docker exec` | `POST /scripts/run` `{"task_id": "同一 task_id", "code": "..."}`（共享 `/workspace`） |
 

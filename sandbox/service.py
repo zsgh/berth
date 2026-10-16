@@ -25,6 +25,7 @@ from sandbox.paths import BASE_DIR, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, s
 from sandbox.systemd_units import kill_unit, list_sbx_units, stop_unit, unit_active
 from sandbox.tracing import span
 from state.db import (
+    delete_service_row,
     get_service_row,
     init_db,
     list_port_rows,
@@ -230,23 +231,37 @@ def get_service(service_id: str) -> dict | None:
     return _refresh_row(row)
 
 
-def list_services(status: str | None = None) -> list[dict]:
-    return [_refresh_row(r) for r in list_service_rows(status)]
+def list_services(include_inactive: bool = False, status: str | None = None) -> list[dict]:
+    """服务列表。
+
+    默认只返回活跃（starting/running）的服务，等价于 `docker ps`；
+    include_inactive=True 时把历史记录（stopped/crashed）也带上，等价于 `docker ps -a`。
+    """
+    # 先全量刷新状态（DB 里写 running 但 unit 已经没了的会被修正为 crashed）
+    rows = [_refresh_row(r) for r in list_service_rows()]
+    if status:
+        return [r for r in rows if r["status"] == status]
+    if not include_inactive:
+        return [r for r in rows if r["status"] in ACTIVE_STATUSES]
+    return rows
 
 
 # ─────────────────────────── 停止 ───────────────────────────
 
 
-def stop_service(service_id: str) -> dict:
-    """停止服务并清理：systemd unit → overlay → 端口（带 Phoenix trace 埋点）。"""
+def stop_service(service_id: str, purge: bool = False) -> dict:
+    """停止服务并清理：systemd unit → overlay → 端口（带 Phoenix trace 埋点）。
+
+    purge=True 时连 SQLite 里的历史记录一并删除。
+    """
     with span("service.stop", service_id=service_id) as s:
-        svc = _stop_service_impl(service_id)
+        svc = _stop_service_impl(service_id, purge=purge)
         s.set_attribute("status", svc["status"])
         s.set_attribute("template", svc.get("template", ""))
         return svc
 
 
-def _stop_service_impl(service_id: str) -> dict:
+def _stop_service_impl(service_id: str, purge: bool = False) -> dict:
     row = get_service_row(service_id)
     if not row:
         raise ValueError(f"没有这个服务: {service_id}")
@@ -262,7 +277,10 @@ def _stop_service_impl(service_id: str) -> dict:
 
     release_port(service_id)
     update_service_status(service_id, "stopped")
-    log.info("服务已停止: %s", service_id)
+    log.info("服务已停止: %s%s", service_id, "（记录已清除）" if purge else "")
+    if purge:
+        delete_service_row(service_id)
+        return dict(row, status="stopped", purged=True)
     return get_service(service_id) or dict(row, status="stopped")
 
 

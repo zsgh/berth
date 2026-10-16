@@ -117,8 +117,9 @@ def services_start(req: ServiceRequest) -> dict:
 
 
 @app.get("/services")
-def services_list() -> list[dict]:
-    return list_services()
+def services_list(all: bool = False, status: str | None = None) -> list[dict]:
+    """服务列表：默认只列活跃服务（?all=true 可看历史，?status= 可精确过滤）。"""
+    return list_services(include_inactive=all, status=status)
 
 
 @app.get("/services/{service_id}")
@@ -130,8 +131,9 @@ def services_get(service_id: str) -> dict:
 
 
 @app.delete("/services/{service_id}")
-def services_stop(service_id: str) -> dict:
+def services_stop(service_id: str, purge: bool = False) -> dict:
+    """停止并清理服务；purge=true 时连历史记录一并删除。"""
     try:
-        return stop_service(service_id)
+        return stop_service(service_id, purge=purge)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

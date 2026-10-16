@@ -129,8 +129,20 @@ curl -s "http://localhost:9000/scripts?limit=10"
 
 ### `GET /services`
 
-列出所有服务（含历史记录，`status` 有 `running/stopped/crashed/starting`）。
-返回前会核对 systemd 实际状态：unit 已不在的会更新为 `crashed`。
+列出服务。默认只返回**活跃**（starting/running）服务 —— 等价于 `docker ps`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `all` | false | `true` 时把历史记录（stopped/crashed）也带上 —— 等价于 `docker ps -a` |
+| `status` | - | 精确过滤：`starting` / `running` / `stopped` / `crashed` |
+
+返回前会核对 systemd 实际状态：unit 已不在的会修正为 `crashed`（默认列表里就不再出现）。
+
+```bash
+curl -s http://localhost:9000/services               # 活跃服务
+curl -s "http://localhost:9000/services?all=true"    # 含历史
+curl -s "http://localhost:9000/services?status=stopped"
+```
 
 ### `GET /services/{service_id}`
 
@@ -138,10 +150,15 @@ curl -s "http://localhost:9000/scripts?limit=10"
 
 ### `DELETE /services/{service_id}`
 
-停止并清理：`systemctl stop` → 删除 overlay 工作目录 →（`persist: false` 时删数据卷）→ 释放端口 → 状态置 `stopped`。
+停止并清理：`systemctl stop` → 删除 overlay 工作目录 →（`persist: false` 时删数据卷）→ 释放端口。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `purge` | false | `true` 时连 SQLite 记录一起删除（history 列表里也不再出现） |
 
 ```bash
 curl -s -X DELETE http://localhost:9000/services/svc-16b83efe
+curl -s -X DELETE "http://localhost:9000/services/svc-16b83efe?purge=true"   # 连记录一起清
 ```
 
 ---

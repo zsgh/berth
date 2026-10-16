@@ -210,6 +210,14 @@ def update_service_status(service_id: str, status: str) -> None:
     conn.close()
 
 
+def delete_service_row(service_id: str) -> None:
+    """彻底删除一条服务记录（审计历史清理用）。"""
+    conn = connect()
+    with conn:
+        conn.execute("DELETE FROM services WHERE service_id=?", (service_id,))
+    conn.close()
+
+
 # ─────────────────────────── ports ───────────────────────────
 
 
