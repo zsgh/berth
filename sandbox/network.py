@@ -28,7 +28,11 @@ def _now() -> str:
 
 
 def port_in_use(port: int) -> bool:
-    """探测宿主端口是否已被占用（先试连，再试绑）。"""
+    """探测宿主端口是否已被占用（先试连，再试绑）。
+
+    绑定探测带 SO_REUSEADDR：TIME_WAIT 状态的端口不算占用（服务自己监听时
+    通常也带 SO_REUSEADDR，行为保持一致，避免重启后端口无谓地漂移）。
+    """
     # 1) 已经有服务在 listen → connect 成功
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.2)
@@ -36,6 +40,7 @@ def port_in_use(port: int) -> bool:
             return True
     # 2) 被绑定但没 listen / 绑在别的地址 → bind 失败
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("0.0.0.0", port))
         except OSError:
@@ -44,9 +49,15 @@ def port_in_use(port: int) -> bool:
 
 
 def allocate_port(
-    service_id: str, internal: int, port_range: tuple[int, int] | None = None
+    service_id: str,
+    internal: int,
+    port_range: tuple[int, int] | None = None,
+    prefer: int | None = None,
 ) -> int:
-    """为 service_id 的 internal 端口分配一个宿主端口，记录到 SQLite。"""
+    """为 service_id 的 internal 端口分配一个宿主端口，记录到 SQLite。
+
+    prefer: 优先尝试的端口（重启服务时传上次用的端口，尽量保持稳定）。
+    """
     init_db()
     if port_range is None:
         port_range = PORT_RANGES.get(internal)
@@ -63,7 +74,11 @@ def allocate_port(
         conn.close()
         return existing["external_port"]
 
-    for port in range(*port_range):
+    candidates = list(range(*port_range))
+    if prefer is not None and prefer in candidates:
+        candidates.remove(prefer)
+        candidates.insert(0, prefer)
+    for port in candidates:
         if port in used or port_in_use(port):
             continue
         with conn:

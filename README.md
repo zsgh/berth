@@ -37,8 +37,9 @@ pip install -r requirements.txt
 # 2) 构建沙箱基础镜像（debootstrap，约 3-5 分钟 / 300MB，装到 /opt/berth/rootfs）
 sudo scripts/setup_rootfs.sh
 
-# 3) 想用 redis 模板的话，再构建 redis 镜像（/opt/berth/rootfs-redis）
+# 3) 需要长驻服务镜像的话（redis / mysql，按需选择）
 sudo scripts/setup_rootfs.sh --with-redis
+sudo scripts/setup_rootfs.sh --with-mysql     # Debian 下是 MariaDB（协议兼容）
 ```
 
 镜像就是普通目录，berth 把它当 overlayfs 的只读下层用。
@@ -102,6 +103,12 @@ curl -s -X POST http://localhost:9000/services \
 
 redis-cli -h localhost -p 16379 ping     # PONG
 curl -s -X DELETE http://localhost:9000/services/svc-xxx   # 停止并清理
+
+# 起一个 mysql（MariaDB；首次启动自动初始化数据目录，root 密码见模板 env）
+curl -s -X POST http://localhost:9000/services \
+  -H 'Content-Type: application/json' \
+  -d '{"template": "mysql", "name": "dev-mysql"}'
+mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 ```
 
 完整 API 见 [docs/api.md](docs/api.md)，设计（overlayfs + systemd 怎么配合）见 [docs/design.md](docs/design.md)。
@@ -115,6 +122,7 @@ curl -s -X DELETE http://localhost:9000/services/svc-xxx   # 停止并清理
 | `docker ps` | `GET /services`（默认只列活跃服务） |
 | `docker ps -a` | `GET /services?all=true`（含 stopped/crashed 历史） |
 | `docker stop` | `DELETE /services/{id}` |
+| `docker start` | `POST /services/{id}/start`（复用数据卷） |
 | `docker rm` | `DELETE /services/{id}?purge=true`（连记录一起删） |
 | `docker logs` | `journalctl -u berth-svc-{id}.service` |
 | `docker exec` | `POST /scripts/run` `{"task_id": "同一 task_id", "code": "..."}`（共享 `/workspace`） |
@@ -195,4 +203,5 @@ scripts/smoke_langgraph.sh          # （dev）LangGraph agent 断点恢复；�
 - 沙箱内固定降权到 uid 1000（无 user namespace 映射）；宿主上 uid 1000 的用户能写沙箱产物
 - host 网络模式下服务直接监听宿主端口，靠 SQLite 记录 + 探测去重，不是强制隔离
 - 停止/超时依赖 cgroup 强杀（`unshare` 个别情况下信号掩码不可靠，SIGTERM 不生效）
-- `templates/mysql.yaml` 为结构示例，未提供预装 mysql 的镜像，未验证
+- `templates/mysql.yaml` 基于 MariaDB 10.11（MySQL 协议/客户端兼容），首次启动自动初始化数据目录；
+  root 密码在模板 `env.MYSQL_ROOT_PASSWORD`（默认 `sandbox`），改密码需清掉数据卷重新初始化

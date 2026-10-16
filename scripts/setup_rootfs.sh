@@ -4,9 +4,11 @@
 # 用法：
 #   sudo scripts/setup_rootfs.sh                 # 基础镜像（含 python3）→ /opt/berth/rootfs
 #   sudo scripts/setup_rootfs.sh --with-redis    # 顺带构建 redis 镜像 → /opt/berth/rootfs-redis
+#   sudo scripts/setup_rootfs.sh --with-mysql    # 顺带构建 MariaDB 镜像 → /opt/berth/rootfs-mysql
+#   sudo scripts/setup_rootfs.sh --with-redis --with-mysql   # 都要
 #
 # 可覆盖的环境变量：
-#   PREFIX=/opt/berth     安装前缀（镜像放在 $PREFIX/rootfs 和 $PREFIX/rootfs-redis）
+#   PREFIX=/opt/berth     安装前缀（镜像放在 $PREFIX/rootfs*）
 #   SUITE=bookworm        Debian 发行版代号（Ubuntu 可传 jammy/noble 等）
 #   MIRROR=http://deb.debian.org/debian   软件源
 #
@@ -17,10 +19,18 @@ PREFIX="${PREFIX:-/opt/berth}"
 SUITE="${SUITE:-bookworm}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 WITH_REDIS=0
-[[ "${1:-}" == "--with-redis" ]] && WITH_REDIS=1
+WITH_MYSQL=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-redis) WITH_REDIS=1 ;;
+    --with-mysql) WITH_MYSQL=1 ;;
+    *) echo "未知参数: $arg（支持 --with-redis / --with-mysql）" >&2; exit 1 ;;
+  esac
+done
 
 BASE="$PREFIX/rootfs"
 REDIS="$PREFIX/rootfs-redis"
+MYSQL="$PREFIX/rootfs-mysql"
 
 if [[ $EUID -ne 0 ]]; then
   echo "需要 root 权限：sudo $0 $*" >&2
@@ -79,12 +89,36 @@ build_redis() {
   echo "   完成: $REDIS（$(chroot "$REDIS" /usr/bin/redis-server --version | head -1)）"
 }
 
+# ─────────────────────────── MariaDB（mysql 模板）镜像 ───────────────────────────
+build_mysql() {
+  if [[ -x "$MYSQL/usr/sbin/mariadbd" ]]; then
+    echo "[skip] mysql 镜像已存在: $MYSQL"
+    return
+  fi
+  echo "== [mysql 1/2] 从基础镜像复制 → $MYSQL =="
+  rm -rf "$MYSQL"
+  cp -a "$BASE" "$MYSQL"
+  printf '#!/bin/sh\nexit 101\n' > "$MYSQL/usr/sbin/policy-rc.d"
+  chmod +x "$MYSQL/usr/sbin/policy-rc.d"
+  cp /etc/resolv.conf "$MYSQL/etc/resolv.conf"
+
+  echo "== [mysql 2/2] chroot 安装 mariadb-server + mariadb-client =="
+  DEBIAN_FRONTEND=noninteractive chroot "$MYSQL" apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive chroot "$MYSQL" apt-get install -y -qq --no-install-recommends \
+    mariadb-server mariadb-client
+  chroot "$MYSQL" apt-get clean >/dev/null 2>&1 || true
+  rm -rf "$MYSQL/var/lib/apt/lists"/* 2>/dev/null || true
+  echo "   完成: $MYSQL（$(chroot "$MYSQL" /usr/sbin/mariadbd --version | head -1)）"
+}
+
 build_base
 [[ $WITH_REDIS -eq 1 ]] && build_redis
+[[ $WITH_MYSQL -eq 1 ]] && build_mysql
 
 echo
 echo "全部完成。镜像位置："
 echo "  基础镜像: $BASE"
 [[ $WITH_REDIS -eq 1 ]] && echo "  redis   : $REDIS"
+[[ $WITH_MYSQL -eq 1 ]] && echo "  mysql   : $MYSQL"
 echo
 echo "下一步：uvicorn server:app --host 0.0.0.0 --port 9000"

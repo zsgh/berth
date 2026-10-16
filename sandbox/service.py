@@ -65,24 +65,27 @@ def list_templates() -> list[str]:
 # ─────────────────────────── 健康状况 ───────────────────────────
 
 
-def _wait_tcp(host: str, port: int, timeout: float, interval: float = 0.3) -> bool:
+def _wait_tcp(host: str, port: int, timeout: float, interval: float = 0.3, unit: str | None = None) -> bool:
+    """等 TCP 就绪。可选传 unit：unit 挂了（起不来）就提前失败，不干等超时。"""
     deadline = time.time() + timeout
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.5)
             if s.connect_ex((host, port)) == 0:
                 return True
+        if unit and not unit_active(unit):
+            return False  # 进程都退出了，再等也没用
         if time.time() >= deadline:
             return False
         time.sleep(interval)
 
 
-def check_health(tpl: dict, host: str, port: int, timeout: float | None = None) -> bool:
+def check_health(tpl: dict, host: str, port: int, timeout: float | None = None, unit: str | None = None) -> bool:
     hc = tpl.get("healthcheck") or {}
     hc_type = hc.get("type", "tcp")
     if hc_type != "tcp":
         raise ValueError(f"不支持的健康检查类型: {hc_type}")
-    return _wait_tcp(host, port, timeout or hc.get("timeout", 20), hc.get("interval", 0.3))
+    return _wait_tcp(host, port, timeout or hc.get("timeout", 20), hc.get("interval", 0.3), unit=unit)
 
 
 # ─────────────────────────── 启动 ───────────────────────────
@@ -116,23 +119,38 @@ def start_service(template: str, name: str | None = None, timeout: float | None 
         return svc
 
 
-def _start_service_impl(template: str, name: str | None = None, timeout: float | None = None) -> dict:
+def _start_service_impl(
+    template: str,
+    name: str | None = None,
+    timeout: float | None = None,
+    service_id: str | None = None,
+    svc_dir: Path | None = None,
+    created_at: str | None = None,
+    prefer_port: int | None = None,
+) -> dict:
+    """service_id/svc_dir 传入时表示「复用已有服务」：保留数据卷，端口重新分配（优先原端口）。"""
     tpl = load_template(template)
     init_db()
     ensure_base_dir()
 
     host = "localhost"
-    service_id = "svc-" + uuid.uuid4().hex[:8]
+    service_id = service_id or "svc-" + uuid.uuid4().hex[:8]
     unit = f"berth-{service_id}"
-    svc_dir = BASE_DIR / "services" / service_id
+    svc_dir = svc_dir or BASE_DIR / "services" / service_id
     run_dir = svc_dir / "run"
     upper, work, newroot = run_dir / "upper", run_dir / "work", run_dir / "newroot"
 
-    # 1. 分配端口
+    # 1. 分配端口前先检查镜像是否存在（缺镜像时给出明确指引，而不是晦涩的 mount 报错）
+    image_rootfs = Path(tpl["image_rootfs"])
+    if not image_rootfs.exists():
+        raise ValueError(
+            f"镜像不存在: {image_rootfs}（构建: sudo scripts/setup_rootfs.sh --with-{template}）"
+        )
+
     port_spec = tpl["ports"][0]
     internal = int(port_spec["internal"])
     external_range = tuple(port_spec["external_range"]) if port_spec.get("external_range") else None
-    port = allocate_port(service_id, internal, external_range)
+    port = allocate_port(service_id, internal, external_range, prefer=prefer_port)
 
     try:
         # 2. 准备 overlay 目录
@@ -185,10 +203,11 @@ def _start_service_impl(template: str, name: str | None = None, timeout: float |
             status="starting",
             dir=str(svc_dir),
             persist=1 if persist else 0,
+            **(dict(created_at=created_at) if created_at else {}),
         )
 
-        # 6. 等待健康检查
-        if not check_health(tpl, host, port, timeout):
+        # 6. 等待健康检查（unit 挂了会提前失败，不干等）
+        if not check_health(tpl, host, port, timeout, unit=unit):
             logs = subprocess.run(
                 ["sudo", "-n", "journalctl", "-u", f"{unit}.service", "--no-pager", "-n", "20"],
                 capture_output=True,
@@ -247,6 +266,30 @@ def list_services(include_inactive: bool = False, status: str | None = None) -> 
 
 
 # ─────────────────────────── 停止 ───────────────────────────
+
+
+def start_existing_service(service_id: str, timeout: float | None = None) -> dict:
+    """把已停止的服务原样再起：复用原目录和数据卷（persist 的数据还在），端口重新分配。"""
+    row = get_service_row(service_id)
+    if not row:
+        raise ValueError(f"没有这个服务: {service_id}")
+    if row["status"] in ACTIVE_STATUSES and unit_active(row["unit"]):
+        raise ValueError(f"服务已在运行: {service_id}（如需重启先 DELETE）")
+
+    with span("service.start", template=row["template"], name=row.get("name") or "", reuse=1) as s:
+        svc = _start_service_impl(
+            row["template"],
+            name=row.get("name"),
+            timeout=timeout,
+            service_id=service_id,
+            svc_dir=Path(row["dir"]),
+            created_at=row.get("created_at"),
+            prefer_port=row.get("port"),
+        )
+        s.set_attribute("service_id", svc["service_id"])
+        s.set_attribute("port", svc["port"])
+        s.set_attribute("status", svc["status"])
+        return svc
 
 
 def stop_service(service_id: str, purge: bool = False) -> dict:

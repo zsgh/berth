@@ -1,15 +1,35 @@
-# 长驻服务模板：mysql
-# ⚠️ 注意：需要先构建 /opt/berth/rootfs-mysql（chroot 里装 mysql-server-8.0），
-# 目前环境只验证了 redis；此模板作为结构示例保留。
+# 长驻服务模板：MySQL 协议（Debian 下用 MariaDB，协议 / 客户端完全兼容）
+# 镜像构建：sudo scripts/setup_rootfs.sh --with-mysql → /opt/berth/rootfs-mysql
+#
+# ⚠️ args 里会做 {port} 之类的占位符替换（str.format），
+#    脚本中请避免使用花括号（不要写 ${VAR}，用 $VAR）。
 name: mysql
 image_rootfs: /opt/berth/rootfs-mysql
-command: ["/usr/sbin/mysqld"]
+command: ["/bin/bash", "-c"]
 args:
-  - "--port={port}"
-  - "--bind-address=0.0.0.0"
-  - "--datadir=/var/lib/mysql"
-  - "--user=root"
+  - |
+    set -e
+    DATADIR=/var/lib/mysql
+    if [ ! -d "$DATADIR/mysql" ]; then
+      echo "[berth] 首次启动：初始化 MariaDB 数据目录 $DATADIR"
+      mariadb-install-db --no-defaults --datadir="$DATADIR" \
+        --auth-root-authentication-method=normal --skip-test-db
+    fi
+    # 每次启动执行（幂等）：设置 root 密码，并允许 root 从宿主连接（root@%）
+    printf '%s\n' \
+      "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';" \
+      "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';" \
+      "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;" \
+      "FLUSH PRIVILEGES;" > /tmp/mariadb-init.sql
+    exec /usr/sbin/mariadbd --no-defaults \
+      --port={port} \
+      --bind-address=0.0.0.0 \
+      --datadir="$DATADIR" \
+      --init-file=/tmp/mariadb-init.sql \
+      --socket=/tmp/mariadb.sock \
+      --pid-file=/tmp/mariadb.pid
 env:
+  # 首次初始化时生效；客户端连接：mariadb -h 127.0.0.1 -P <宿主端口> -u root -p$MYSQL_ROOT_PASSWORD
   MYSQL_ROOT_PASSWORD: "sandbox"
 ports:
   - internal: 3306
@@ -20,7 +40,7 @@ volumes:
 healthcheck:
   type: tcp
   port: 3306
-  timeout: 60
+  timeout: 120        # 首次启动要初始化数据目录，时间给足
   interval: 0.5
 resources:
   memory_mb: 1024

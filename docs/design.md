@@ -136,6 +136,15 @@ daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is
    FastAPI ≥0.14x 内置 OTel 支持：进程里一旦设置了 TracerProvider，HTTP 请求会自动产生
    `fastapi.endpoint` 等 span（无需安装额外 instrumentor）。daemon 的 trace 因此自带 HTTP 层。
 
+9. **MariaDB 初始化（mysql 模板）**
+   `mariadbd --bootstrap` 模式强制 `--skip-grant-tables`，在里面执行 `ALTER USER`/`GRANT`
+   会报 `ERROR 1290 ... --skip-grant-tables`。改用 `--init-file`：正常启动流程里执行 SQL，
+   幂等语句（`CREATE USER IF NOT EXISTS` + `ALTER USER`）每次启动重复执行也没问题。
+
+10. **缺镜像的报错**
+    lowerdir 不存在时 overlayfs 只报 `special device overlay does not exist`，非常难懂。
+    启动服务前显式校验 `image_rootfs` 是否存在，直接给出「镜像不存在 + 构建命令」。
+
 ## 5. 可观测性（Phoenix）
 
 - `sandbox/tracing.py`：OTLP HTTP exporter → `http://localhost:6006/v1/traces`，

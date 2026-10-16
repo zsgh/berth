@@ -199,6 +199,11 @@ def _run_script_impl(
     task_id = str(task_id) if task_id else f"auto-{uuid.uuid4().hex[:12]}"
     ensure_base_dir()
 
+    if not Path(ROOTFS).exists():
+        raise ValueError(
+            f"基础镜像不存在: {ROOTFS}（构建: sudo scripts/setup_rootfs.sh；或用 BERTH_ROOTFS 指定）"
+        )
+
     run_id = uuid.uuid4().hex[:8]
     script_dir = BASE_DIR / "scripts" / task_id
     run_dir = script_dir / f"run-{run_id}"

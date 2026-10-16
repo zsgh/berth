@@ -161,6 +161,17 @@ curl -s -X DELETE http://localhost:9000/services/svc-16b83efe
 curl -s -X DELETE "http://localhost:9000/services/svc-16b83efe?purge=true"   # 连记录一起清
 ```
 
+### `POST /services/{service_id}/start`
+
+把**已停止**的服务原样再起：复用原目录与数据卷（`persist: true` 的数据还在），端口重新分配（优先复用上次的端口）。
+
+```bash
+curl -s -X POST http://localhost:9000/services/svc-16b83efe/start
+# → {"service_id":"svc-16b83efe","port":13307,"status":"running",...}
+```
+
+已在运行的服务调用会返回 400（需先 DELETE 再 start）。
+
 ---
 
 ## 其他

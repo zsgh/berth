@@ -33,6 +33,7 @@ from sandbox.service import (
     get_service,
     list_services,
     recover_services,
+    start_existing_service,
     start_service,
     stop_service,
 )
@@ -68,13 +69,16 @@ def health() -> dict:
 @app.post("/scripts/run")
 def scripts_run(req: RunRequest) -> dict:
     """跑一次性脚本：overlayfs 沙箱执行 → 返回结果 → 自动清理。"""
-    return run_script(
-        req.code,
-        task_id=req.task_id,
-        timeout=req.timeout,
-        memory_mb=req.memory_mb,
-        cpu_percent=req.cpu_percent,
-    )
+    try:
+        return run_script(
+            req.code,
+            task_id=req.task_id,
+            timeout=req.timeout,
+            memory_mb=req.memory_mb,
+            cpu_percent=req.cpu_percent,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/scripts")
@@ -114,6 +118,15 @@ def services_start(req: ServiceRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e))
+
+
+@app.post("/services/{service_id}/start")
+def services_start_existing(service_id: str) -> dict:
+    """把已停止的服务原样再起（复用数据卷，端口重新分配）。"""
+    try:
+        return start_existing_service(service_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/services")
