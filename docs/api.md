@@ -186,6 +186,37 @@ curl -s -X POST http://localhost:9000/services/svc-16b83efe/start
 
 ## 模板格式（templates/{name}.yaml）
 
+模板 ≈ 「`docker run` 的固定参数模板」。**字段语义与 Kubernetes 对齐**：
+
+| | 可执行文件 | 参数 |
+|---|---|---|
+| Dockerfile | `ENTRYPOINT` | `CMD` |
+| docker-compose | `entrypoint:` | `command:` |
+| Kubernetes | `command:` | `args:` |
+| **berth 模板** | `command:` | `args:` |
+
+> 规则：**最终 argv = command + args**。
+> 注意：berth 和 docker-compose 是两套命名——compose 的 `entrypoint` 对应 berth 的 `command`，
+> compose 的 `command` 对应 berth 的 `args`。
+
+### 字段表
+
+| 字段 | 类型 | 必填 | 说明 | Docker 对照 |
+|---|---|---|---|---|
+| `name` | string | ✔ | 服务名 | `--name` |
+| `image_rootfs` | string | ✔ | 本地 rootfs 目录（`setup_rootfs.sh` 构建） | `image`（但非仓库引用） |
+| `command` | list | ✔ | 可执行程序 argv | `ENTRYPOINT` / k8s `command` |
+| `args` | list | - | 追加参数；支持 `{port}`/`{service_id}`/`{name}` 占位符 | `CMD` / k8s `args` |
+| `env` | map | - | 环境变量（值同样支持占位符） | `environment` |
+| `ports` | list | ✔ | `[{internal, external_range}]`，宿主端口**动态分配** | `-p`（但我们是分配区间而非写死） |
+| `volumes` | list | - | `[{internal, persist}]`，数据卷放服务目录 `volumes/` 下 | `volumes` |
+| `healthcheck` | map | - | `{type: tcp, port, timeout, interval}` | `healthcheck`（仅 tcp） |
+| `resources` | map | - | `{memory_mb, cpu_percent}`（100 = 1 核） | `--memory` / `--cpus` |
+
+### 校验
+
+未知字段**直接报错**，并尽量给出 docker/compose 习惯的迁移提示。完整示例：
+
 ```yaml
 name: redis
 image_rootfs: /opt/berth/rootfs-redis   # 预装该服务的 rootfs
@@ -207,6 +238,16 @@ resources:
   memory_mb: 512
   cpu_percent: 100
 ```
+
+常见的被拦写法：
+
+| 写了 | 报错提示 |
+|---|---|
+| `entrypoint:` | 用 `command`（berth 同 K8s 语义） |
+| `image:` | 用 `image_rootfs`（本地目录） |
+| `environment:` | 用 `env` |
+| `ports: ["6379:6379"]` | 用 `{internal, external_range}`（端口动态分配） |
+| `mem_limit:` / `cpus:` | 用 `resources.memory_mb` / `resources.cpu_percent` |
 
 ---
 

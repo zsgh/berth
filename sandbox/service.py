@@ -45,16 +45,130 @@ ACTIVE_STATUSES = ("starting", "running")
 
 # ─────────────────────────── 模板 ───────────────────────────
 
+# berth 模板的合法字段（语义与 K8s 的 command/args 一致）
+ALLOWED_FIELDS = {
+    "name",
+    "image_rootfs",
+    "command",
+    "args",
+    "env",
+    "ports",
+    "volumes",
+    "healthcheck",
+    "resources",
+}
+
+# 常见「从 docker 抄过来」的字段 → 迁移提示
+FIELD_HINTS = {
+    "image": "用 image_rootfs（berth 的镜像是本地 rootfs 目录，见 scripts/setup_rootfs.sh）",
+    "entrypoint": "用 command（berth 与 K8s 语义一致：command=可执行程序、args=参数；"
+                  "compose 的 entrypoint 对应 command，compose 的 command 对应 args）",
+    "environment": "用 env",
+    "container_name": "用 name",
+    "expose": "用 ports（[{internal: ..., external_range: [...]}]）",
+    "build": "不支持 build（镜像 = 预构建的 rootfs 目录）",
+    "mem_limit": "用 resources.memory_mb",
+    "cpus": "用 resources.cpu_percent（100 = 1 核）",
+    "deploy": "用 resources（memory_mb / cpu_percent）",
+    "restart": "不支持 restart（服务由 systemd 托管，daemon 重启时会自动恢复状态）",
+    "networks": "不支持 networks（host 网络模式）",
+    "network_mode": "不支持 network_mode（host 网络模式）",
+    "depends_on": "不支持 depends_on（单服务模板）",
+}
+
+# 各子结构的合法字段
+SECTION_FIELDS = {
+    "ports": {"internal", "external_range"},
+    "volumes": {"internal", "persist"},
+    "healthcheck": {"type", "port", "timeout", "interval"},
+    "resources": {"memory_mb", "cpu_percent"},
+}
+
+_PORTS_HINT = (
+    "berth 的宿主端口是动态分配的：请写成 "
+    "[{internal: 6379, external_range: [16379, 16479]}]，实际端口在启动返回值里"
+)
+
+
+def _check_fields(tpl_name: str, section: str, value: dict) -> None:
+    allowed = SECTION_FIELDS[section]
+    bad = sorted(set(value.keys()) - allowed)
+    if bad:
+        raise ValueError(
+            f"模板 {tpl_name} 的 {section} 不支持字段 {bad}（可用: {sorted(allowed)}）"
+        )
+
 
 def load_template(name: str) -> dict:
+    """读取并校验服务模板。
+
+    语义上等同「docker run 的参数模板」，字段与 K8s 风格一致：
+    command = 可执行程序，args = 参数，最终 argv = command + args。
+    未知/写错的字段直接报错，并尽量给出 docker/compose 习惯的迁移提示。
+    """
     path = TEMPLATES_DIR / f"{name}.yaml"
     if not path.exists():
         available = sorted(p.stem for p in TEMPLATES_DIR.glob("*.yaml"))
         raise ValueError(f"模板不存在: {name}（可用: {available}）")
     tpl = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(tpl, dict):
+        raise ValueError(f"模板 {name} 必须是 YAML 映射（key: value）")
+
+    # 1) 未知字段：报错 + 迁移提示
+    unknown = sorted(set(tpl.keys()) - ALLOWED_FIELDS)
+    if unknown:
+        msgs = []
+        for key in unknown:
+            hint = FIELD_HINTS.get(str(key))
+            if hint:
+                msgs.append(f"{key!r} → {hint}")
+            else:
+                msgs.append(f"{key!r}（未知字段）")
+        raise ValueError(
+            f"模板 {name} 包含不支持的字段：" + "；".join(msgs)
+            + f"。可用字段: {sorted(ALLOWED_FIELDS)}"
+        )
+
+    # 2) 必填
     for key in ("name", "image_rootfs", "command", "ports"):
         if not tpl.get(key):
             raise ValueError(f"模板 {name} 缺少字段: {key}")
+
+    # 3) 类型与子结构
+    if not isinstance(tpl["command"], list):
+        raise ValueError(
+            f"模板 {name} 的 command 必须是数组（argv），如 [\"/usr/bin/redis-server\"]"
+        )
+    if tpl.get("args") is not None and not isinstance(tpl["args"], list):
+        raise ValueError(f"模板 {name} 的 args 必须是数组，如 [\"--port\", \"{'{port}'}\"]")
+    if tpl.get("env") is not None and not isinstance(tpl["env"], dict):
+        raise ValueError(f"模板 {name} 的 env 必须是映射（KEY: value）")
+
+    ports = tpl["ports"]
+    if not isinstance(ports, list):
+        raise ValueError(f"模板 {name} 的 ports 必须是数组")
+    for i, p in enumerate(ports):
+        if isinstance(p, str):
+            raise ValueError(f"模板 {name} 的 ports[{i}] 是字符串 {p!r}：{_PORTS_HINT}")
+        if not isinstance(p, dict) or "internal" not in p:
+            raise ValueError(f"模板 {name} 的 ports[{i}] 需要 internal（+ 可选 external_range）")
+        _check_fields(name, "ports", p)
+
+    for vol in tpl.get("volumes") or []:
+        if not isinstance(vol, dict) or "internal" not in vol:
+            raise ValueError(f"模板 {name} 的每个 volume 需要 internal（+ 可选 persist）")
+        _check_fields(name, "volumes", vol)
+
+    if tpl.get("healthcheck") is not None:
+        if not isinstance(tpl["healthcheck"], dict):
+            raise ValueError(f"模板 {name} 的 healthcheck 必须是映射")
+        _check_fields(name, "healthcheck", tpl["healthcheck"])
+
+    if tpl.get("resources") is not None:
+        if not isinstance(tpl["resources"], dict):
+            raise ValueError(f"模板 {name} 的 resources 必须是映射")
+        _check_fields(name, "resources", tpl["resources"])
+
     return tpl
 
 

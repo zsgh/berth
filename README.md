@@ -127,6 +127,26 @@ mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 | `docker logs` | `journalctl -u berth-svc-{id}.service` |
 | `docker exec` | `POST /scripts/run` `{"task_id": "同一 task_id", "code": "..."}`（共享 `/workspace`） |
 
+## 服务模板（templates/*.yaml）
+
+模板 ≈ 「`docker run` 的固定参数模板」，字段语义与 Kubernetes 对齐：
+
+| | 可执行文件 | 参数 |
+|---|---|---|
+| Dockerfile | `ENTRYPOINT` | `CMD` |
+| docker-compose | `entrypoint:` | `command:` |
+| Kubernetes | `command:` | `args:` |
+| **berth 模板** | `command:` | `args:` |
+
+> 规则：**最终 argv = command + args**；`args` 支持 `{port}` / `{service_id}` / `{name}` 占位符。
+> 注意：berth 与 compose 是两套命名（我们同 K8s）——compose 的 `entrypoint` 对应 `command`、
+> compose 的 `command` 对应 `args`，别按 compose 习惯写。
+> 写错字段会**直接报错并给迁移提示**（如 `entrypoint:` → 提示改用 `command:`，`image:` → 提示用 `image_rootfs:`）。
+
+常用字段：`name`、`image_rootfs`（本地 rootfs 目录）、`command`/`args`、`env`、
+`ports`（`{internal, external_range}`，宿主端口**动态分配**）、`volumes`（`{internal, persist}`）、
+`healthcheck`（tcp）、`resources`（`memory_mb` / `cpu_percent`）。完整字段表见 [docs/api.md](docs/api.md)。
+
 ## 配置（环境变量）
 
 | 变量 | 默认 | 说明 |
