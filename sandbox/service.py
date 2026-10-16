@@ -22,7 +22,7 @@ import yaml
 from sandbox.network import allocate_port, release_port
 from sandbox.overlayfs import SETPRIV, sandbox_shell, systemd_run_cmd
 from sandbox.paths import BASE_DIR, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, sudo
-from sandbox.systemd_units import kill_unit, list_sbx_units, stop_unit, unit_active
+from sandbox.systemd_units import kill_unit, list_managed_units, stop_unit, unit_active
 from sandbox.tracing import span
 from state.db import (
     delete_service_row,
@@ -461,14 +461,15 @@ def recover_services() -> None:
 def cleanup_orphans() -> list[str]:
     """清理 daemon 崩了以后遗留的资源：
 
-    1. 宿主上存在但 SQLite 里没有记录的 berth-* unit → 停掉删掉
+    1. 宿主上存在但 SQLite 里没有记录的 workload unit（berth-svc-* / berth-run-*）
+       → 停掉删掉。**只认这两个前缀**，不碰 daemon 自己的 unit（见 systemd_units.py）
     2. SQLite 里 state 非活跃、但端口还占着的记录 → 释放
     """
     init_db()
     # systemd 列出的单元名带后缀（xxx.service / xxx.scope），DB 里存的是裸名
     known_units = {f"{r['unit']}.service" for r in list_service_rows()}
     cleaned = []
-    for unit in list_sbx_units():
+    for unit in list_managed_units():
         if unit not in known_units:
             log.warning("清理孤儿 unit: %s", unit)
             kill_unit(unit)

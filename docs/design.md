@@ -93,7 +93,9 @@ setpriv --reuid=1000 --regid=1000 --clear-groups \
 daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is-active`，活着的保持 `running`（端口不动），
 死了的标 `crashed` 并释放端口。所以 `pkill uvicorn` 再重启，redis 还在、还能连。
 
-**孤儿清理**：`cleanup_orphans()` 对比 `systemctl list-units 'berth-*'` 和 SQLite：
+**孤儿清理**：`cleanup_orphans()` 对比 systemd 和 SQLite。注意只认 **`berth-svc-*`（服务）和 `berth-run-*`（一次性执行）** 两种前缀——
+不能图省事用 `berth-*` 一把捞：daemon 自己的 unit（如 `berth.service`、`berth-daemon.service`）也在这个名字空间里，
+一把捞会在启动清理时把 daemon 自己 SIGKILL 掉（systemd 再重启它 → 无限自杀循环，真踩过，见第 11 条）。
 宿主上存在但库里没有的 unit（上次 daemon 崩了留下的）→ 强杀 + reset-failed；
 库里非活跃但仍占端口的记录 → 释放。注意 unit 名带后缀（`.service`/`.scope`），比对时要统一。
 
@@ -144,6 +146,12 @@ daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is
 10. **缺镜像的报错**
     lowerdir 不存在时 overlayfs 只报 `special device overlay does not exist`，非常难懂。
     启动服务前显式校验 `image_rootfs` 是否存在，直接给出「镜像不存在 + 构建命令」。
+
+11. **孤儿清理不能一把捞 `berth-*`**
+    daemon 自己的 systemd unit（`berth.service` / `berth-daemon.service` …）和 workload
+    （`berth-svc-*` / `berth-run-*`）共享 "berth-" 前缀。清理时如果按 `berth-*` 匹配，
+    daemon 启动会把**自己**当孤儿 SIGKILL（systemd 再重启 → 无限自杀循环，实测踩到）。
+    修法：`list_managed_units()` 只匹配 `berth-svc-*` 和 `berth-run-*`。
 
 ## 5. 可观测性（Phoenix）
 

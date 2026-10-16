@@ -1,0 +1,30 @@
+# Lima VM 定义 —— berth 的 Linux 运行环境（在 macOS 上使用）
+#
+# 两种用法：
+#   1) 推荐：scripts/macos-bootstrap.sh
+#      （创建/复用本 VM + 安装 berth + 注册 systemd 服务，一条命令）
+#   2) 手动：limactl start --name=lima scripts/lima.yaml
+#      然后跑 scripts/macos-bootstrap.sh 完成后面的安装步骤
+#
+# ── 资源配置都是「上限」，不是预留 ──
+#   cpus:   空闲时占用 ≈ 0，只有 VM 里真在算才用
+#   memory: 按需增长，封顶 8GiB（空转的 Debian + berth 通常 300-600MB）
+#   disk:   稀疏镜像，用多少占多少（du 看实际，ls 看上限）
+# 调整：limactl stop lima && limactl edit lima   （磁盘只能调大，下次启动生效）
+cpus: 4
+memory: 8GiB
+disk: 40GiB
+
+# 不挂宿主目录：代码和数据都放 VM 本地盘。
+# 原因：overlayfs 的 upper/work 不能建在 virtiofs/9p 共享目录上；
+# 需要和 Mac 交换文件时，用 git / limactl copy / rsync 即可。
+mounts: []
+
+images:
+  - location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2"
+    arch: "aarch64"
+  - location: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+    arch: "x86_64"
+
+# 端口转发：VM 内监听 0.0.0.0 / 127.0.0.1 的端口会被自动转发到 Mac 的 localhost
+# （berth daemon :9000、服务端口 16379 / 13306 等，Mac 上直接 curl / redis-cli 就行）

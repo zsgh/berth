@@ -254,5 +254,6 @@ resources:
 ## 状态与恢复语义
 
 - daemon 重启：读 SQLite 中 `running` 的服务 → `systemctl is-active` 仍然活着 → 保持 `running`；死了 → 标 `crashed` 并释放端口
-- 启动时清理孤儿：宿主上 `berth-*` 但 SQLite 无记录的 unit → 强杀 + reset-failed；没有活跃服务引用的端口记录 → 释放
+- 启动时清理孤儿：宿主上存在但 SQLite 无记录的 **`berth-svc-*` / `berth-run-*`** 单元 → 强杀 + reset-failed；
+  daemon 自己的 unit 不在清理范围内；没有活跃服务引用的端口记录 → 释放
 - 服务 unit 全部用 `systemd-run --collect` 创建，停止后自动从 systemd 卸载

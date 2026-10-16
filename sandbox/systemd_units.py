@@ -18,10 +18,20 @@ def unit_active(unit: str) -> bool:
     return res.returncode == 0
 
 
-def list_sbx_units() -> list[str]:
-    """列出宿主上所有 berth-* 开头的 systemd 单元。"""
+# berth 会管理的 workload 单元（**不含 daemon 自己的 unit**）
+# 服务: berth-svc-<id>.service   一次性执行: berth-run-<id>.scope
+MANAGED_PATTERNS = ("berth-svc-*", "berth-run-*")
+
+
+def list_managed_units() -> list[str]:
+    """列出 berth 管理的 workload 单元（服务 + 一次性执行）。
+
+    注意：只认 berth-svc-* / berth-run-* 两种前缀 —— 绝不能把名字里带
+    "berth" 的其他单元（比如 daemon 自己的 berth.service / berth-daemon.service）
+    当成孤儿，否则 daemon 会把自己杀掉。
+    """
     res = subprocess.run(
-        ["systemctl", "list-units", "--all", "--output=json", "--no-pager", "berth-*"],
+        ["systemctl", "list-units", "--all", "--output=json", "--no-pager", *MANAGED_PATTERNS],
         capture_output=True,
         text=True,
     )

@@ -23,6 +23,21 @@ berth 是一个轻量沙箱服务（HTTP API），用来**跑一次性脚本**�
 
 > 不建议在受限容器里运行：`unshare` 新 PID namespace 常被 seccomp 拦，overlayfs 也可能被禁。VM / 裸机上没有这些问题。
 
+## 在 macOS 上（需要一台 Linux）
+
+上面这些内核依赖 macOS 都没有 —— 和 Docker Desktop 必须内置一个 Linux VM 是同一个道理。
+berth 的选择是用现成的通用 VM（推荐 Lima），一条命令装好：
+
+```bash
+git clone https://github.com/zsgh/berth.git && cd berth
+scripts/macos-bootstrap.sh     # 建 VM(4C/8G/40G) → 装 berth → 注册 systemd 服务 → 验证
+curl http://localhost:9000/health
+```
+
+- 资源都是**上限不是预留**（空闲≈0），端口自动转发到 Mac 的 localhost
+- 已有 Linux（远程服务器 / WSL2 / 其他 VM）不需要这个脚本，直接在那台上跑 berth 就行
+- 细节（管理命令、共享目录的坑、排障）见 [docs/macos.md](docs/macos.md)
+
 ## 安装（从零开始）
 
 ```bash
@@ -186,10 +201,10 @@ berth/
 │   ├── systemd_units.py    # systemd unit 查询 / 有界停止
 │   └── tracing.py          # OpenTelemetry → Phoenix（可选）
 ├── state/db.py             # SQLite：runs / services / ports
-├── templates/              # redis.yaml（已验证）/ mysql.yaml（示例）
+├── templates/              # redis.yaml / mysql.yaml（MariaDB）
 ├── tests/                  # 各模块验证脚本
-├── scripts/                # setup_rootfs.sh + smoke 脚本
-└── docs/                   # api.md / design.md
+├── scripts/                # setup_rootfs / macos-bootstrap / lima.yaml / smoke 脚本
+└── docs/                   # api.md / design.md / macos.md
 ```
 
 ## 测试与冒烟
@@ -200,6 +215,8 @@ berth/
 python3 tests/test_overlayfs.py     # 沙箱：hello / 超时 / 外网 / artifacts / OOM
 python3 tests/test_db.py            # SQLite
 python3 tests/test_network.py       # 端口分配
+python3 tests/test_template.py      # 模板校验（未知字段拦截 / docker 迁移提示）
+python3 tests/test_orphans.py       # 孤儿清理安全（不误伤 daemon 自身的 unit）
 python3 tests/test_service.py       # redis 起停（需要 rootfs-redis + redis-cli）
 
 scripts/smoke_services.sh           # 起 redis → 外部连上 → 停止
