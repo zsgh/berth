@@ -157,14 +157,18 @@ curl -s -X PUT localhost:9000/services/my-redis \
 | `status` | - | 精确过滤：`starting` / `running` / `stopped` / `crashed` |
 | `usage` | true | `false` 跳过用量统计（服务多时更快） |
 
-每行附带 `usage`（等价 `docker stats` 的静态快照）：
+每行附带 `usage`（等价 `docker stats` 的静态快照）——人类可读字段 + 原始数值：
 
 ```json
 "usage": {
-  "memory_bytes": 13598720,        // 当前内存（cgroup 实时值）
-  "memory_limit_bytes": 536870912, // 内存上限（模板 resources）
-  "cpu_time_ms": 9324.6,           // CPU 累计时间
-  "disk_bytes": 49537              // 服务目录实际占用（overlay + 数据卷）
+  "memory": "13.0 MiB",          // 当前内存（cgroup 实时值）
+  "memory_limit": "512.0 MiB",   // 内存上限（模板 resources）
+  "cpu_time": "13.5s",           // CPU 累计时间（732ms / 9.3s / 1h 2m 24s 风格）
+  "disk": "48.4 KiB",            // 服务目录实际占用（overlay + 数据卷）
+  "memory_bytes": 13598720,      // 原始值，脚本/agent 用
+  "memory_limit_bytes": 536870912,
+  "cpu_time_ms": 13459.0,
+  "disk_bytes": 49537
 }
 ```
 

@@ -33,9 +33,7 @@ curl -s $API/services | python3 -c "
 import json,sys
 for s in json.load(sys.stdin):
     u = s.get('usage') or {}
-    mb = (u.get('memory_bytes') or 0) / 1048576
-    disk = (u.get('disk_bytes') or 0) / 1048576
-    print(f\"  {s['name']:<12} {s['host']}:{s['port']}  内存 {mb:.1f}MB / 上限 {(u.get('memory_limit_bytes') or 0)/1048576:.0f}MB  磁盘 {disk:.1f}MB\")"
+    print(f\"  {s['name']:<12} {s['host']}:{s['port']}  内存 {u.get('memory')} / 上限 {u.get('memory_limit')}  CPU {u.get('cpu_time')}  磁盘 {u.get('disk')}\")"
 
 say "4. 数据卷一览"
 curl -s $API/volumes | python3 -m json.tool | head -14

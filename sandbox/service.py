@@ -430,16 +430,57 @@ def _systemd_usage(unit: str) -> dict:
     return out
 
 
+def _human_bytes(n: int | None) -> str | None:
+    """13598720 → '13.0 MiB'；49537 → '48.4 KiB'。"""
+    if n is None:
+        return None
+    v = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if v < 1024 or unit == "TiB":
+            return f"{int(v)} B" if unit == "B" else f"{v:.1f} {unit}"
+        v /= 1024
+    return None
+
+
+def _human_time_ms(ms: float | None) -> str | None:
+    """13459 → '13.5s'；731.6 → '732ms'；3744000 → '1h 2m 24s'。"""
+    if ms is None:
+        return None
+    seconds = ms / 1000.0
+    if seconds < 1:
+        return f"{int(round(ms))}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m {sec}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {sec}s"
+
+
 def _with_usage(row: dict) -> dict:
     row = dict(row)
     usage = {
-        "disk_bytes": _dir_size(row.get("dir")),
+        # 人类可读
+        "memory": None,
+        "memory_limit": None,
+        "cpu_time": None,
+        "disk": None,
+        # 原始值（机器用）
         "memory_bytes": None,
         "memory_limit_bytes": None,
         "cpu_time_ms": None,
+        "disk_bytes": None,
     }
+    disk = _dir_size(row.get("dir"))
+    usage["disk_bytes"] = disk
+    usage["disk"] = _human_bytes(disk)
     if row.get("status") in ACTIVE_STATUSES:
-        usage.update(_systemd_usage(row.get("unit") or ""))
+        raw = _systemd_usage(row.get("unit") or "")
+        usage.update(raw)
+        usage["memory"] = _human_bytes(raw.get("memory_bytes"))
+        usage["memory_limit"] = _human_bytes(raw.get("memory_limit_bytes"))
+        usage["cpu_time"] = _human_time_ms(raw.get("cpu_time_ms"))
     row["usage"] = usage
     return row
 
