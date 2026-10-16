@@ -157,20 +157,26 @@ curl -s -X PUT localhost:9000/services/my-redis \
 | `status` | - | 精确过滤：`starting` / `running` / `stopped` / `crashed` |
 | `usage` | true | `false` 跳过用量统计（服务多时更快） |
 
-每行附带 `usage`（等价 `docker stats` 的静态快照）——人类可读字段 + 原始数值：
+每行附两个用量视图：`usage`（机器可读原始值）和 `usage-h`（人类可读，`-h` = human）。
 
 ```json
 "usage": {
-  "memory": "13.0 MiB",          // 当前内存（cgroup 实时值）
-  "memory_limit": "512.0 MiB",   // 内存上限（模板 resources）
-  "cpu_time": "13.5s",           // CPU 累计时间（732ms / 9.3s / 1h 2m 24s 风格）
-  "disk": "48.4 KiB",            // 服务目录实际占用（overlay + 数据卷）
-  "memory_bytes": 13598720,      // 原始值，脚本/agent 用
-  "memory_limit_bytes": 536870912,
-  "cpu_time_ms": 13459.0,
-  "disk_bytes": 49537
+  "memory_bytes": 131440640,       // 当前实际占用（cgroup 实时）
+  "memory_limit_bytes": 1073741824,// 上限（模板 resources.memory_mb）
+  "cpu_time_ms": 1131.6,           // 启动至今累计消耗的 CPU 时间（不是百分比）
+  "disk_bytes": 130500281          // 服务目录占用（overlay + 数据卷）
+},
+"usage-h": {
+  "memory": "125.4 MiB",
+  "memory_limit": "1.0 GiB",
+  "cpu_time": "1.1s",
+  "disk": "124.5 MiB"
 }
 ```
+
+- `memory` 是实时值会起伏；`memory_limit` 是硬上限（超了会被 OOM 杀）
+- `cpu_time` 是累计消耗：跑很久但只有 1.1s 说明服务基本空闲（想看百分比可对比两次采样的差值）
+- 服务停止后 `memory/memory_limit/cpu_time` 为 null，`disk` 仍然有效（数据还在）
 
 ### `GET /services/{ref}`
 

@@ -146,16 +146,17 @@ def main():
     print("=== 用量 / 数据卷 / 连卷删除 ===")
     d = start_service("redis", "usage-check")
     detail = get_service("usage-check")
-    u = detail["usage"]
+    u, uh = detail["usage"], detail["usage-h"]
     print("usage:", u)
+    print("usage-h:", uh)
     assert u["memory_bytes"] and u["memory_bytes"] > 0, "运行中应有内存用量"
     assert u["memory_limit_bytes"] and u["disk_bytes"] is not None
-    # 人类可读格式
-    assert u["memory"].endswith(("KiB", "MiB", "GiB")), u
-    assert u["memory_limit"].endswith(("KiB", "MiB", "GiB")), u
-    assert u["disk"].endswith(("B", "KiB", "MiB", "GiB")), u
-    assert u["cpu_time"].endswith(("ms", "s")) or "m" in u["cpu_time"], u
-    print("人类可读:", u["memory"], "/", u["memory_limit"], "|", u["cpu_time"], "|", u["disk"])
+    # 人类可读视图
+    assert uh["memory"].endswith(("KiB", "MiB", "GiB")), uh
+    assert uh["memory_limit"].endswith(("KiB", "MiB", "GiB")), uh
+    assert uh["disk"].endswith(("B", "KiB", "MiB", "GiB")), uh
+    assert uh["cpu_time"].endswith(("ms", "s")) or "m" in uh["cpu_time"], uh
+    print("人类可读:", uh["memory"], "/", uh["memory_limit"], "|", uh["cpu_time"], "|", uh["disk"])
     vols = [v for v in list_volumes() if v["service_id"] == d["service_id"]]
     assert vols and vols[0]["orphan"] is False, vols
     print("卷:", vols[0]["bytes"], "bytes")

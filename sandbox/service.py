@@ -459,29 +459,27 @@ def _human_time_ms(ms: float | None) -> str | None:
 
 
 def _with_usage(row: dict) -> dict:
+    """给服务行附上用量：
+
+    usage    —— 机器可读原始值（bytes / ms）
+    usage-h  —— 人类可读视图（"13.0 MiB" / "1h 2m 24s"），-h = human
+    """
     row = dict(row)
-    usage = {
-        # 人类可读
-        "memory": None,
-        "memory_limit": None,
-        "cpu_time": None,
-        "disk": None,
-        # 原始值（机器用）
+    raw = {
         "memory_bytes": None,
         "memory_limit_bytes": None,
         "cpu_time_ms": None,
-        "disk_bytes": None,
+        "disk_bytes": _dir_size(row.get("dir")),
     }
-    disk = _dir_size(row.get("dir"))
-    usage["disk_bytes"] = disk
-    usage["disk"] = _human_bytes(disk)
     if row.get("status") in ACTIVE_STATUSES:
-        raw = _systemd_usage(row.get("unit") or "")
-        usage.update(raw)
-        usage["memory"] = _human_bytes(raw.get("memory_bytes"))
-        usage["memory_limit"] = _human_bytes(raw.get("memory_limit_bytes"))
-        usage["cpu_time"] = _human_time_ms(raw.get("cpu_time_ms"))
-    row["usage"] = usage
+        raw.update(_systemd_usage(row.get("unit") or ""))
+    row["usage"] = raw
+    row["usage-h"] = {
+        "memory": _human_bytes(raw["memory_bytes"]),
+        "memory_limit": _human_bytes(raw["memory_limit_bytes"]),
+        "cpu_time": _human_time_ms(raw["cpu_time_ms"]),
+        "disk": _human_bytes(raw["disk_bytes"]),
+    }
     return row
 
 

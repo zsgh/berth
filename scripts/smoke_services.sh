@@ -32,7 +32,7 @@ say "3. 列表（含用量）"
 curl -s $API/services | python3 -c "
 import json,sys
 for s in json.load(sys.stdin):
-    u = s.get('usage') or {}
+    u = s.get('usage-h') or {}
     print(f\"  {s['name']:<12} {s['host']}:{s['port']}  内存 {u.get('memory')} / 上限 {u.get('memory_limit')}  CPU {u.get('cpu_time')}  磁盘 {u.get('disk')}\")"
 
 say "4. 数据卷一览"
