@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from sandbox.images import resolve_image
 from sandbox.network import allocate_port, release_port
 from sandbox.overlayfs import SETPRIV, sandbox_shell, systemd_run_cmd
 from sandbox.paths import BASE_DIR, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, sudo
@@ -48,7 +49,7 @@ ACTIVE_STATUSES = ("starting", "running")
 # berth 模板的合法字段（语义与 K8s 的 command/args 一致）
 ALLOWED_FIELDS = {
     "name",
-    "image_rootfs",
+    "image",
     "command",
     "args",
     "env",
@@ -60,7 +61,7 @@ ALLOWED_FIELDS = {
 
 # 常见「从 docker 抄过来」的字段 → 迁移提示
 FIELD_HINTS = {
-    "image": "用 image_rootfs（berth 的镜像是本地 rootfs 目录，见 scripts/setup_rootfs.sh）",
+    "image_rootfs": "改用 image: <名字>（镜像名表：images.yaml 或自动发现 /opt/berth/rootfs-*；base=基础镜像）",
     "entrypoint": "用 command（berth 与 K8s 语义一致：command=可执行程序、args=参数；"
                   "compose 的 entrypoint 对应 command，compose 的 command 对应 args）",
     "environment": "用 env",
@@ -130,7 +131,7 @@ def load_template(name: str) -> dict:
         )
 
     # 2) 必填
-    for key in ("name", "image_rootfs", "command", "ports"):
+    for key in ("name", "image", "command", "ports"):
         if not tpl.get(key):
             raise ValueError(f"模板 {name} 缺少字段: {key}")
 
@@ -289,12 +290,8 @@ def _start_service_impl(
     run_dir = svc_dir / "run"
     upper, work, newroot = run_dir / "upper", run_dir / "work", run_dir / "newroot"
 
-    # 1. 分配端口前先检查镜像是否存在（缺镜像时给出明确指引，而不是晦涩的 mount 报错）
-    image_rootfs = Path(tpl["image_rootfs"])
-    if not image_rootfs.exists():
-        raise ValueError(
-            f"镜像不存在: {image_rootfs}（构建: sudo scripts/setup_rootfs.sh --with-{template}）"
-        )
+    # 1. 解析镜像名（缺镜像时给出明确指引，而不是晦涩的 mount 报错）
+    image_path = resolve_image(tpl["image"])
 
     port_spec = tpl["ports"][0]
     internal = int(port_spec["internal"])
@@ -329,7 +326,7 @@ def _start_service_impl(
             upper=upper,
             work=work,
             newroot=newroot,
-            lower=tpl["image_rootfs"],
+            lower=str(image_path),
             binds=binds,
             env=env,
             # 同 run_script：bash 作为 pid ns init，捕获退出码（长驻进程退出码进 journal）
@@ -392,45 +389,147 @@ def _refresh_row(row: dict) -> dict:
     return row
 
 
-def get_service(service_id: str) -> dict | None:
-    row = get_service_row(service_id)
-    if not row:
+# ─────────────────────────── 用量（内存/CPU/磁盘） ───────────────────────────
+
+
+def _dir_size(path) -> int | None:
+    """目录实际占用字节数（du -sb；普通权限读不到时用 sudo 兜底）。"""
+    if not path:
+        return 0
+    path = str(path)
+    res = subprocess.run(["du", "-sb", "--", path], capture_output=True, text=True)
+    if res.returncode != 0:
+        res = sudo("du", "-sb", "--", path, check=False)
+    try:
+        return int(res.stdout.split()[0])
+    except (ValueError, IndexError):
         return None
-    return _refresh_row(row)
 
 
-def list_services(include_inactive: bool = False, status: str | None = None) -> list[dict]:
+def _systemd_usage(unit: str) -> dict:
+    """从 systemd 取实时资源：内存当前值/上限、CPU 累计时间。"""
+    out = {"memory_bytes": None, "memory_limit_bytes": None, "cpu_time_ms": None}
+    if not unit:
+        return out
+    res = subprocess.run(
+        ["systemctl", "show", "-p", "MemoryCurrent", "-p", "MemoryMax", "-p", "CPUUsageNSec", unit],
+        capture_output=True,
+        text=True,
+    )
+    for line in res.stdout.splitlines():
+        k, _, v = line.partition("=")
+        if not v.isdigit():
+            continue  # [not set] / infinity 等
+        n = int(v)
+        if k == "MemoryCurrent":
+            out["memory_bytes"] = None if n >= 2**63 else n  # u64max = 未限制
+        elif k == "MemoryMax":
+            out["memory_limit_bytes"] = None if n >= 2**63 else n
+        elif k == "CPUUsageNSec":
+            out["cpu_time_ms"] = round(n / 1e6, 1)
+    return out
+
+
+def _with_usage(row: dict) -> dict:
+    row = dict(row)
+    usage = {
+        "disk_bytes": _dir_size(row.get("dir")),
+        "memory_bytes": None,
+        "memory_limit_bytes": None,
+        "cpu_time_ms": None,
+    }
+    if row.get("status") in ACTIVE_STATUSES:
+        usage.update(_systemd_usage(row.get("unit") or ""))
+    row["usage"] = usage
+    return row
+
+
+# ─────────────────────────── 查询 ───────────────────────────
+
+
+def resolve_ref(ref: str) -> dict | None:
+    """ref 可以是 svc-id 或服务名；返回刷新过状态的记录（找不到返回 None）。"""
+    ref = str(ref or "").strip()
+    if not ref:
+        return None
+    if ref.startswith("svc-"):
+        row = get_service_row(ref)
+        if row:
+            return _refresh_row(row)
+    return _latest_by_name(ref)
+
+
+def get_service(ref: str) -> dict | None:
+    row = resolve_ref(ref)
+    return _with_usage(row) if row else None
+
+
+def list_services(
+    include_inactive: bool = False, status: str | None = None, with_usage: bool = True
+) -> list[dict]:
     """服务列表。
 
     默认只返回活跃（starting/running）的服务，等价于 `docker ps`；
     include_inactive=True 时把历史记录（stopped/crashed）也带上，等价于 `docker ps -a`。
+    with_usage=True 时附带内存/CPU/磁盘用量（等价 docker stats 的静态快照）。
     """
     # 先全量刷新状态（DB 里写 running 但 unit 已经没了的会被修正为 crashed）
     rows = [_refresh_row(r) for r in list_service_rows()]
     if status:
-        return [r for r in rows if r["status"] == status]
-    if not include_inactive:
-        return [r for r in rows if r["status"] in ACTIVE_STATUSES]
+        rows = [r for r in rows if r["status"] == status]
+    elif not include_inactive:
+        rows = [r for r in rows if r["status"] in ACTIVE_STATUSES]
+    if with_usage:
+        rows = [_with_usage(r) for r in rows]
     return rows
+
+
+def list_volumes() -> list[dict]:
+    """所有数据卷一览：归属服务、占用字节数、是否孤儿（记录已删但卷还在）。"""
+    root = BASE_DIR / "services"
+    if not root.is_dir():
+        return []
+    rows = {r["service_id"]: r for r in list_service_rows()}
+    out = []
+    for svc_dir in sorted(root.iterdir()):
+        vol_dir = svc_dir / "volumes"
+        if not vol_dir.is_dir():
+            continue
+        row = rows.get(svc_dir.name)
+        out.append(
+            {
+                "service_id": svc_dir.name,
+                "name": row["name"] if row else None,
+                "template": row["template"] if row else None,
+                "status": row["status"] if row else None,
+                "path": str(vol_dir),
+                "bytes": _dir_size(vol_dir),
+                "orphan": row is None,
+            }
+        )
+    return out
 
 
 # ─────────────────────────── 停止 ───────────────────────────
 
 
-def start_existing_service(service_id: str, timeout: float | None = None) -> dict:
-    """把已停止的服务原样再起：复用原目录和数据卷（persist 的数据还在），端口重新分配。"""
-    row = get_service_row(service_id)
+def start_existing_service(ref: str, timeout: float | None = None) -> dict:
+    """把已停止的服务原样再起：复用原目录和数据卷（persist 的数据还在），端口优先复用。
+
+    ref 可以是 svc-id 或服务名。
+    """
+    row = resolve_ref(ref)
     if not row:
-        raise ValueError(f"没有这个服务: {service_id}")
+        raise ValueError(f"没有这个服务: {ref}")
     if row["status"] in ACTIVE_STATUSES and unit_active(row["unit"]):
-        raise ValueError(f"服务已在运行: {service_id}（如需重启先 DELETE）")
+        raise ValueError(f"服务已在运行: {row['service_id']}（要重启先 stop）")
 
     with span("service.start", template=row["template"], name=row.get("name") or "", reuse=1) as s:
         svc = _start_service_impl(
             row["template"],
             name=row.get("name"),
             timeout=timeout,
-            service_id=service_id,
+            service_id=row["service_id"],
             svc_dir=Path(row["dir"]),
             created_at=row.get("created_at"),
             prefer_port=row.get("port"),
@@ -441,16 +540,30 @@ def start_existing_service(service_id: str, timeout: float | None = None) -> dic
         return svc
 
 
-def stop_service(service_id: str, purge: bool = False) -> dict:
-    """停止服务并清理：systemd unit → overlay → 端口（带 Phoenix trace 埋点）。
-
-    purge=True 时连 SQLite 里的历史记录一并删除。
-    """
-    with span("service.stop", service_id=service_id) as s:
-        svc = _stop_service_impl(service_id, purge=purge)
+def stop_service(ref: str) -> dict:
+    """停止服务（保留记录与数据卷）：systemd unit → overlay → 端口（带 trace 埋点）。"""
+    row = resolve_ref(ref)
+    if not row:
+        raise ValueError(f"没有这个服务: {ref}")
+    with span("service.stop", service_id=row["service_id"]) as s:
+        svc = _stop_service_impl(row["service_id"])
         s.set_attribute("status", svc["status"])
         s.set_attribute("template", svc.get("template", ""))
         return svc
+
+
+def delete_service(ref: str, volumes: bool = False) -> dict:
+    """停止并删除服务记录；volumes=True 时连数据卷一起删（docker rm -v 语义）。"""
+    row = resolve_ref(ref)
+    if not row:
+        raise ValueError(f"没有这个服务: {ref}")
+    with span("service.stop", service_id=row["service_id"], deleted=True) as s:
+        _stop_service_impl(row["service_id"], purge=True)
+        if volumes:
+            sudo("rm", "-rf", Path(row["dir"]) / "volumes", check=False)
+        s.set_attribute("volumes_deleted", volumes)
+    log.info("服务已删除: %s%s", row["service_id"], "（含数据卷）" if volumes else "")
+    return dict(row, status="stopped", deleted=True, volumes_deleted=bool(volumes))
 
 
 def _stop_service_impl(service_id: str, purge: bool = False) -> dict:
@@ -473,7 +586,8 @@ def _stop_service_impl(service_id: str, purge: bool = False) -> dict:
     if purge:
         delete_service_row(service_id)
         return dict(row, status="stopped", purged=True)
-    return get_service(service_id) or dict(row, status="stopped")
+    fresh = get_service_row(service_id)
+    return _with_usage(fresh) if fresh else dict(row, status="stopped")
 
 
 # ─────────────────────────── 恢复 / 孤儿清理（阶段三） ───────────────────────────

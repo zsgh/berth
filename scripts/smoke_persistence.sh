@@ -26,15 +26,15 @@ curl -sf "$API/health" >/dev/null 2>&1 || start_daemon
 echo "daemon ok"
 
 echo "════ 1. 启动 redis 服务 ════"
-RESP=$(curl -s -X POST $API/services -H "Content-Type: application/json" -d '{"template": "redis", "name": "persist-redis"}')
+RESP=$(curl -s -X PUT $API/services/persist-redis -H "Content-Type: application/json" -d '{"template": "redis"}')
 SID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['service_id'])")
 PORT=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['port'])")
 echo "service_id=$SID port=$PORT"
 redis-cli -h localhost -p $PORT ping
 
 echo "════ 2. 制造孤儿 unit ════"
-sudo systemd-run --unit=berth-orphan-test --collect sleep 1000 >/dev/null 2>&1
-systemctl is-active berth-orphan-test.service && echo "孤儿已创建"
+sudo systemd-run --unit=berth-svc-orphan-test --collect sleep 1000 >/dev/null 2>&1
+systemctl is-active berth-svc-orphan-test.service && echo "孤儿已创建"
 
 echo "════ 3. 杀掉 daemon（SIGKILL 模拟崩溃） ════"
 stop_daemon_kill9
@@ -53,8 +53,8 @@ echo "服务状态: $STATUS"
 redis-cli -h localhost -p $PORT ping
 
 echo "════ 7. 孤儿清理检查 ════"
-if systemctl status berth-orphan-test.service >/dev/null 2>&1; then
-  echo "❌ 孤儿 unit 还在"; systemctl status berth-orphan-test.service --no-pager | head -3; exit 1
+if systemctl status berth-svc-orphan-test.service >/dev/null 2>&1; then
+  echo "❌ 孤儿 unit 还在"; systemctl status berth-svc-orphan-test.service --no-pager | head -3; exit 1
 else
   echo "孤儿 unit 已被清理（not found）"
 fi
@@ -70,6 +70,6 @@ print('OK')
 "
 
 echo "════ 9. 清理 ════"
-curl -s -X DELETE $API/services/$SID >/dev/null
+curl -s -X DELETE "$API/services/$SID?volumes=true" >/dev/null
 redis-cli -h localhost -p $PORT ping 2>&1 | head -1
 echo "阶段三验收全部通过 ✔"

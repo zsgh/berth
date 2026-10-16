@@ -1,6 +1,6 @@
 # berth（泊位）
 
-> 给每个任务一个泊位，给每个服务一个泊位：跑完即走（`POST /scripts/run`），或停泊常驻（`POST /services`，systemd 托管）。
+> 给每个任务一个泊位，给每个服务一个泊位：跑完即走（`POST /scripts/run`），或停泊常驻（`PUT /services/{name}`，systemd 托管，名字即身份）。
 
 berth 是一个轻量沙箱服务（HTTP API），用来**跑一次性脚本**和**起长驻服务**（redis 等）。
 沙箱不用 Docker、不用 bwrap，直接复用 Linux 原语：
@@ -104,25 +104,30 @@ sudo systemctl enable --now berth
 curl -s http://localhost:9000/health
 # {"status":"ok"}
 
-# 跑一段代码（沙箱内执行，host 网络，/workspace 是持久工作区）
+# 跑代码（沙箱内执行，host 网络，/workspace 是持久工作区）
 curl -s -X POST http://localhost:9000/scripts/run \
-  -H 'Content-Type: application/json' \
-  -d '{"code": "print(\"hello\")"}'
-# {"stdout":"hello\n","stderr":"","exit_code":0,"duration":0.08,"artifacts":[],"task_id":"auto-..."}
+  -H 'Content-Type: application/json' -d '{"code": "print(\"hello\")"}'
+# 也可以跑其它语言 / 直接跑命令 / 换镜像：
+curl -s -X POST http://localhost:9000/scripts/run \
+  -H 'Content-Type: application/json' -d '{"code": "echo $((6*7))", "language": "bash"}'
+curl -s -X POST http://localhost:9000/scripts/run \
+  -H 'Content-Type: application/json' -d '{"cmd": ["/bin/uname", "-s"]}'
 
-# 起一个 redis（需要 --with-redis 的镜像）
-curl -s -X POST http://localhost:9000/services \
-  -H 'Content-Type: application/json' \
-  -d '{"template": "redis", "name": "my-redis"}'
-# {"service_id":"svc-xxx","host":"localhost","port":16379,"status":"running",...}
+# 起一个 redis（redis 是名字；重复调用幂等，不会重复创建）
+curl -s -X PUT http://localhost:9000/services/my-redis \
+  -H 'Content-Type: application/json' -d '{"template": "redis"}'
+# {"service_id":"svc-xxx","host":"localhost","port":16379,"status":"running","reused":false,...}
 
-redis-cli -h localhost -p 16379 ping     # PONG
-curl -s -X DELETE http://localhost:9000/services/svc-xxx   # 停止并清理
+redis-cli -h localhost -p 16379 ping          # PONG
+curl -s http://localhost:9000/services        # 列表（含内存/磁盘用量）
+curl -s http://localhost:9000/volumes         # 数据卷一览（含孤儿卷）
+curl -s -X POST   localhost:9000/services/my-redis/stop    # 停（数据保留）
+curl -s -X POST   localhost:9000/services/my-redis/start   # 原样再起
+curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据删干净
 
 # 起一个 mysql（MariaDB；首次启动自动初始化数据目录，root 密码见模板 env）
-curl -s -X POST http://localhost:9000/services \
-  -H 'Content-Type: application/json' \
-  -d '{"template": "mysql", "name": "dev-mysql"}'
+curl -s -X PUT http://localhost:9000/services/mysql \
+  -H 'Content-Type: application/json' -d '{"template": "mysql"}'
 mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 ```
 
@@ -132,15 +137,16 @@ mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 
 | 想做的事 | berth |
 |---|---|
-| `docker run image cmd` | `POST /scripts/run` `{"code": "..."}`（跑完即走，自动清理） |
-| `docker run -d redis` | `POST /services` `{"template": "redis", "name": "my-redis"}`（同名幂等：重复调用不会重复创建，已停止则原样再起） |
+| `docker run image cmd` | `POST /scripts/run` `{"cmd": [...]}`（跑完即走，自动清理） |
+| `docker run -d redis` | `PUT /services/my-redis` `{"template": "redis"}`（名字即身份，重复调用幂等） |
 | `docker ps` | `GET /services`（默认只列活跃服务） |
 | `docker ps -a` | `GET /services?all=true`（含 stopped/crashed 历史） |
-| `docker stop` | `DELETE /services/{id}` |
-| `docker start` | `POST /services/{id}/start`（复用数据卷） |
-| `docker rm` | `DELETE /services/{id}?purge=true`（连记录一起删） |
+| `docker stats` | `GET /services` 每行的 `usage`（内存/CPU/磁盘） |
+| `docker stop` / `docker start` | `POST /services/{name}/stop` / `.../start`（数据保留） |
+| `docker rm` / `docker rm -v` | `DELETE /services/{name}` / `...?volumes=true` |
+| `docker volume ls` | `GET /volumes`（含孤儿卷标记） |
 | `docker logs` | `journalctl -u berth-svc-{id}.service` |
-| `docker exec` | `POST /scripts/run` `{"task_id": "同一 task_id", "code": "..."}`（共享 `/workspace`） |
+| `docker exec` | `POST /scripts/run` `{"task_id": "同一 task_id", "cmd": [...]}`（共享 `/workspace`） |
 
 ## 服务模板（templates/*.yaml）
 
@@ -156,11 +162,12 @@ mariadb -h 127.0.0.1 -P 13306 -u root -psandbox -e 'SELECT VERSION();'
 > 规则：**最终 argv = command + args**；`args` 支持 `{port}` / `{service_id}` / `{name}` 占位符。
 > 注意：berth 与 compose 是两套命名（我们同 K8s）——compose 的 `entrypoint` 对应 `command`、
 > compose 的 `command` 对应 `args`，别按 compose 习惯写。
-> 写错字段会**直接报错并给迁移提示**（如 `entrypoint:` → 提示改用 `command:`，`image:` → 提示用 `image_rootfs:`）。
+> 写错字段会**直接报错并给迁移提示**（如 `entrypoint:` → 提示改用 `command:`，`image_rootfs:` → 提示用 `image:`）。
 
-常用字段：`name`、`image_rootfs`（本地 rootfs 目录）、`command`/`args`、`env`、
-`ports`（`{internal, external_range}`，宿主端口**动态分配**）、`volumes`（`{internal, persist}`）、
-`healthcheck`（tcp）、`resources`（`memory_mb` / `cpu_percent`）。完整字段表见 [docs/api.md](docs/api.md)。
+常用字段：`name`、`image`（镜像名：base/redis/mysql/自定义，见 `scripts/setup_rootfs.sh`）、
+`command`/`args`、`env`、`ports`（`{internal, external_range}`，宿主端口**动态分配**）、
+`volumes`（`{internal, persist}`）、`healthcheck`（tcp）、`resources`（`memory_mb` / `cpu_percent`）。
+完整字段表见 [docs/api.md](docs/api.md)。
 
 ## 配置（环境变量）
 
@@ -196,6 +203,7 @@ berth/
 ├── sandbox/
 │   ├── paths.py            # 路径 / 提权辅助（root 或 sudo -n 两种模式）
 │   ├── overlayfs.py        # run_script：overlay+pivot_root+setpriv 执行
+│   ├── images.py           # 镜像名解析（base/redis/mysql/自动发现）
 │   ├── network.py          # 端口分配（host 模式无需 veth）
 │   ├── service.py          # 长驻服务生命周期 + 恢复 + 孤儿清理
 │   ├── systemd_units.py    # systemd unit 查询 / 有界停止
@@ -216,6 +224,7 @@ python3 tests/test_overlayfs.py     # 沙箱：hello / 超时 / 外网 / artifac
 python3 tests/test_db.py            # SQLite
 python3 tests/test_network.py       # 端口分配
 python3 tests/test_template.py      # 模板校验（未知字段拦截 / docker 迁移提示）
+python3 tests/test_images.py        # 镜像名解析（自动发现 / images.yaml）
 python3 tests/test_orphans.py       # 孤儿清理安全（不误伤 daemon 自身的 unit）
 python3 tests/test_service.py       # redis 起停（需要 rootfs-redis + redis-cli）
 

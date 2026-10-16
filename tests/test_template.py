@@ -19,7 +19,7 @@ from sandbox.service import load_template  # noqa: E402
 
 BASE = {
     "name": "t",
-    "image_rootfs": "/opt/berth/rootfs",
+    "image": "base",
     "command": ["/bin/true"],
     "ports": [{"internal": 6379, "external_range": [16379, 16479]}],
 }
@@ -64,8 +64,8 @@ def main():
     msg = expect_error("command", yaml_of(entrypoint=["/usr/bin/redis-server"]))
     print("✔ entrypoint 提示:", msg[:80], "...")
 
-    msg = expect_error("image_rootfs", yaml_of(image="redis:7"))
-    print("✔ image 提示:", msg[:70], "...")
+    msg = expect_error("image: <名字>", yaml_of(image_rootfs="/opt/berth/rootfs"))
+    print("✔ image_rootfs 旧字段提示:", msg[:70], "...")
 
     expect_error("env", yaml_of(environment={"A": "1"}))
     expect_error("resources.memory_mb", yaml_of(mem_limit="256m"))

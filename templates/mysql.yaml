@@ -1,10 +1,10 @@
 # 长驻服务模板：MySQL 协议（Debian 下用 MariaDB，协议 / 客户端完全兼容）
-# 镜像构建：sudo scripts/setup_rootfs.sh --with-mysql → /opt/berth/rootfs-mysql
+# 镜像构建：sudo scripts/setup_rootfs.sh --with-mysql（镜像名 mysql）
 #
 # ⚠️ args 里会做 {port} 之类的占位符替换（str.format），
 #    脚本中请避免使用花括号（不要写 ${VAR}，用 $VAR）。
 name: mysql
-image_rootfs: /opt/berth/rootfs-mysql
+image: mysql                              # 镜像名（images.yaml / 自动发现 rootfs-*）
 command: ["/bin/bash", "-c"]
 args:
   - |

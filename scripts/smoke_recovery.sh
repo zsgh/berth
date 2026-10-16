@@ -19,7 +19,7 @@ curl -sf "$API/health" >/dev/null || start_daemon
 say "1. 跑脚本：/workspace 写文件 + 起一个 redis 服务"
 curl -s -X POST $API/scripts/run -H "Content-Type: application/json" \
   -d '{"code": "open(\"/workspace/hello.txt\",\"w\").write(\"hi from sandbox\"); print(\"written\")", "task_id": "smoke-script"}' | python3 -m json.tool
-RESP=$(curl -s -X POST $API/services -H "Content-Type: application/json" -d '{"template": "redis", "name": "smoke-persist"}')
+RESP=$(curl -s -X PUT $API/services/smoke-persist -H "Content-Type: application/json" -d '{"template": "redis"}')
 SID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['service_id'])")
 PORT=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['port'])")
 echo "redis: $SID @ $PORT"; redis-cli -h localhost -p $PORT ping
@@ -53,7 +53,7 @@ curl -s -X POST $API/scripts/run -H "Content-Type: application/json" \
   -d '{"code": "print(open(\"/workspace/hello.txt\").read())", "task_id": "smoke-script"}' | python3 -c "import json,sys; print('  stdout:', json.load(sys.stdin)['stdout'].strip())"
 
 say "8. 收尾"
-curl -s -X DELETE $API/services/$SID >/dev/null
+curl -s -X DELETE "$API/services/$SID?volumes=true" >/dev/null
 echo "redis 已停止"
 
 echo; echo "Smoke 完成 ✔"

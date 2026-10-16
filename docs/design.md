@@ -58,12 +58,14 @@ cd $RUN/newroot && mkdir -p .oldroot && pivot_root . .oldroot && umount -l /.old
 # 5) 降权：uid 1000 + 清 bounding/inheritable/ambient capability
 setpriv --reuid=1000 --regid=1000 --clear-groups \
         --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
-        /usr/bin/python3 /sandbox/run.py
+        /usr/bin/python3 /sandbox/run.py   # 默认；也可以 bash/sh/shebang/cmd（见下）
 ```
 
 关键点：
 
-- **代码放哪**：写进 `upper/sandbox/run.py`。upper 是 overlay 的可写层，所以沙箱里天然能看到 `/sandbox/run.py`，且每次执行互相隔离。
+- **代码放哪**：写进 `upper/sandbox/run.<ext>`（python→run.py、bash/sh→run.sh；`cmd` 模式直接执行 argv）。
+  upper 是 overlay 的可写层，所以沙箱里天然能看到 `/sandbox/`，且每次执行互相隔离。
+  解释器选择：`language` 参数 → 首行 shebang → 默认 python；镜像是名字（`sandbox/images.py`）。
 - **谁能写**：执行前 `chown -R 1000:1000 upper workspace`，沙箱里 uid 1000 才能写 `/sandbox` 和 `/workspace`；rootfs 下层只读。
 - **pivot_root 而不是 chroot**：pivot_root 换根后 `/` 就是合成根，旧根卸载掉，沙箱里看不到宿主文件系统。
 - **namespace**：`unshare --pid --mount --ipc --uts --fork`；**不 unshare net**（host 网络，可进可出）。
@@ -83,7 +85,7 @@ setpriv --reuid=1000 --regid=1000 --clear-groups \
 5. 健康检查（TCP 连接宿主端口，重试到超时）
 6. 记录 SQLite（`status=running`）
 
-**同名幂等**：`POST /services` 带 `name` 时按名字查现有实例——
+**同名幂等**：`PUT /services/{name}` 按名字查现有实例——
 在跑就直接返回（`reused=true`）、停了就原样再起（复用数据卷）、模板不同报 409。
 名字即身份，重复调用不会重复创建实例（agent 重试友好）。
 
@@ -149,7 +151,8 @@ daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is
 
 10. **缺镜像的报错**
     lowerdir 不存在时 overlayfs 只报 `special device overlay does not exist`，非常难懂。
-    启动服务前显式校验 `image_rootfs` 是否存在，直接给出「镜像不存在 + 构建命令」。
+    现在镜像统一走名字解析（`sandbox/images.py`）：未知名字/目录缺失在启动前直接报
+    「镜像不存在 + 构建命令」，不再抛晦涩的 mount 错。
 
 11. **孤儿清理不能一把捞 `berth-*`**
     daemon 自己的 systemd unit（`berth.service` / `berth-daemon.service` …）和 workload

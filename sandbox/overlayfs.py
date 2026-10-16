@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
+from sandbox.images import resolve_image
 from sandbox.paths import BASE_DIR, ROOTFS, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, sudo
 from sandbox.systemd_units import kill_unit, stop_unit
 from sandbox.tracing import span
@@ -152,30 +153,69 @@ def list_artifacts(workspace: Path) -> list[str]:
     )
 
 
+# 支持的语言 → (解释器, 文件后缀)。其它解释器用 shebang 指定（需在镜像里存在）。
+LANGUAGES: dict[str, tuple[str, str]] = {
+    "python": ("/usr/bin/python3", ".py"),
+    "python3": ("/usr/bin/python3", ".py"),
+    "bash": ("/bin/bash", ".sh"),
+    "sh": ("/bin/sh", ".sh"),
+}
+
+
+def _resolve_interpreter(code: str, language: str | None) -> tuple[list[str], str, str]:
+    """决定用什么跑 code：language 参数 > 首行 shebang > 默认 python。"""
+    if language:
+        key = str(language).lower()
+        if key in LANGUAGES:
+            interp, ext = LANGUAGES[key]
+            return [interp], ext, key
+        raise ValueError(
+            f"不支持的语言: {language}（支持: {sorted(LANGUAGES)}；"
+            f"其它解释器可在代码首行写 shebang，前提是镜像里有）"
+        )
+    first = (code.splitlines() or [""])[0]
+    if first.startswith("#!"):
+        tokens = first[2:].strip().split()
+        if tokens:
+            if tokens[0].endswith("/env") and len(tokens) >= 2:
+                interp = [tokens[0], tokens[1]]
+            else:
+                interp = [tokens[0]]
+            return interp, ".sh", "shebang:" + " ".join(interp)
+    return ["/usr/bin/python3"], ".py", "python"
+
+
 def run_script(
-    code: str,
+    code: str | None = None,
+    cmd: list[str] | None = None,
+    language: str | None = None,
+    image: str = "base",
     task_id: str | None = None,
     timeout: int = 30,
     memory_mb: int = 256,
     cpu_percent: int = 50,
     keep_dirs: bool = False,
 ) -> dict:
-    """在 overlayfs 沙箱里跑一段 Python 代码（带 Phoenix trace 埋点）。
+    """在 overlayfs 沙箱里跑一段代码或一条命令（带 Phoenix trace 埋点）。
 
-    参数：
-        code:        要执行的 Python 代码
-        task_id:     任务标识（缺省自动生成 uuid）；同一 task_id 共享 /workspace
-        timeout:     超时秒数，超时强制终止并返回 exit_code=-1
-        memory_mb:   内存上限
-        cpu_percent: CPU 配额
-        keep_dirs:   保留本次 overlay 目录（默认执行完即删）
+    code 和 cmd 二选一：
+        code:  源码字符串；language（python/bash/sh）或首行 shebang 决定解释器，默认 python
+        cmd:   直接执行的 argv（等价 `docker run <image> <cmd...>`，程序需在镜像里存在）
+    image:     镜像名（base/redis/mysql/自定义，见 sandbox/images.py）
+    task_id:   任务标识（缺省自动生成 uuid）；同一 task_id 共享 /workspace
+    timeout:   超时秒数，超时强制终止并返回 exit_code=-1
+    memory_mb / cpu_percent: cgroup 限额
+    keep_dirs: 保留本次 overlay 目录（默认执行完即删）
 
     返回：
-        {"stdout", "stderr", "exit_code", "duration", "artifacts", "task_id"}
+        {"stdout", "stderr", "exit_code", "duration", "artifacts", "task_id", "image", "language"}
     """
-    with span("script.run", task_id=str(task_id or ""), timeout=timeout) as s:
+    with span("script.run", task_id=str(task_id or ""), timeout=timeout, image=image) as s:
         result = _run_script_impl(
             code,
+            cmd=cmd,
+            language=language,
+            image=image,
             task_id=task_id,
             timeout=timeout,
             memory_mb=memory_mb,
@@ -189,20 +229,38 @@ def run_script(
 
 
 def _run_script_impl(
-    code: str,
+    code: str | None = None,
+    cmd: list[str] | None = None,
+    language: str | None = None,
+    image: str = "base",
     task_id: str | None = None,
     timeout: int = 30,
     memory_mb: int = 256,
     cpu_percent: int = 50,
     keep_dirs: bool = False,
 ) -> dict:
+    # ─── 参数校验：code/cmd 二选一 ───
+    if (code is None) == (cmd is None):
+        raise ValueError("code 和 cmd 必须（且只能）给一个")
+    if cmd is not None:
+        if language:
+            raise ValueError("cmd 模式不需要 language（直接给完整 argv）")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, (str, int, float)) for x in cmd):
+            raise ValueError('cmd 必须是非空数组，如 ["/bin/ls", "-la"]')
+        argv = [str(x) for x in cmd]
+        script_name = None
+        lang_label = None
+        audit_code = "$ " + " ".join(shlex.quote(str(x)) for x in cmd)
+    else:
+        interp, ext, lang_label = _resolve_interpreter(code, language)
+        script_name = f"run{ext}"
+        argv = [*interp, f"/sandbox/{script_name}"]
+        audit_code = code
+
+    image_path = resolve_image(image)
+
     task_id = str(task_id) if task_id else f"auto-{uuid.uuid4().hex[:12]}"
     ensure_base_dir()
-
-    if not Path(ROOTFS).exists():
-        raise ValueError(
-            f"基础镜像不存在: {ROOTFS}（构建: sudo scripts/setup_rootfs.sh；或用 BERTH_ROOTFS 指定）"
-        )
 
     run_id = uuid.uuid4().hex[:8]
     script_dir = BASE_DIR / "scripts" / task_id
@@ -214,8 +272,9 @@ def _run_script_impl(
     for d in (upper / "sandbox", work, newroot, workspace):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 代码写进 upper 层的 /sandbox/run.py（自动成为 overlay 的一部分）
-    (upper / "sandbox" / "run.py").write_text(code, encoding="utf-8")
+    # 源码写进 upper 层的 /sandbox/（自动成为 overlay 的一部分）
+    if script_name:
+        (upper / "sandbox" / script_name).write_text(code, encoding="utf-8")
 
     # upper / workspace 归 uid 1000，沙箱内才能写
     sudo("chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", upper, workspace)
@@ -224,13 +283,14 @@ def _run_script_impl(
         upper=upper,
         work=work,
         newroot=newroot,
+        lower=str(image_path),
         binds={"/workspace": workspace},
         # 不用 exec、不用 set -e 收尾：让 bash 作为 pid ns 的 init 捕获子进程状态后
         # 以普通 exit 返回。否则 payload 被信号打死（如 cgroup OOM 的 SIGKILL）时，
         # unshare 会把 init 的信号死亡错误地报告成 rc=0。
         entry=(
             "set +e\n"
-            f"{SETPRIV} /usr/bin/python3 /sandbox/run.py\n"
+            f"{SETPRIV} {shlex.join(argv)}\n"
             "rc=$?\n"
             "exit $rc"
         ),
@@ -286,13 +346,15 @@ def _run_script_impl(
         "duration": duration,
         "artifacts": artifacts,
         "task_id": task_id,
+        "image": image,
+        "language": lang_label,
     }
 
     # 审计记录（记录失败不影响执行结果）
     try:
         from state.db import record_run
 
-        record_run(task_id, code, result)
+        record_run(task_id, audit_code, result)
     except Exception:
         logging.getLogger(__name__).exception("record_run failed: task_id=%s", task_id)
 

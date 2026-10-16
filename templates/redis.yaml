@@ -1,7 +1,7 @@
 # 长驻服务模板：redis
-# 需要预装 redis 的 rootfs（在 /opt/berth/rootfs 基础上 chroot 安装 redis-server）
+# 镜像：sudo scripts/setup_rootfs.sh --with-redis（镜像名 redis）
 name: redis
-image_rootfs: /opt/berth/rootfs-redis
+image: redis                              # 镜像名（images.yaml / 自动发现 rootfs-*）
 command: ["/usr/bin/redis-server"]
 # {port} 会被替换成分配到的宿主端口（host 网络模式下直接监听宿主端口）
 args:

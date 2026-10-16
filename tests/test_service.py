@@ -30,8 +30,10 @@ os.environ["BERTH_TEMPLATES_DIR"] = str(TPL_DIR)
 
 from sandbox.network import get_port  # noqa: E402
 from sandbox.service import (  # noqa: E402
+    delete_service,
     get_service,
     list_services,
+    list_volumes,
     start_existing_service,
     start_service,
     stop_service,
@@ -141,6 +143,23 @@ def main():
         print("同名冲突 OK:", str(e)[:70], "...")
     print("✔ ensure 语义通过")
 
+    print("=== 用量 / 数据卷 / 连卷删除 ===")
+    d = start_service("redis", "usage-check")
+    detail = get_service("usage-check")
+    u = detail["usage"]
+    print("usage:", u)
+    assert u["memory_bytes"] and u["memory_bytes"] > 0, "运行中应有内存用量"
+    assert u["memory_limit_bytes"] and u["disk_bytes"] is not None
+    vols = [v for v in list_volumes() if v["service_id"] == d["service_id"]]
+    assert vols and vols[0]["orphan"] is False, vols
+    print("卷:", vols[0]["bytes"], "bytes")
+
+    deleted = delete_service("usage-check", volumes=True)
+    assert deleted["deleted"] and deleted["volumes_deleted"]
+    assert not any(v["service_id"] == d["service_id"] for v in list_volumes())
+    assert get_service("usage-check") is None
+    print("✔ 用量/卷/删除通过")
+
     print("全部通过 ✔")
 
 
@@ -148,6 +167,17 @@ if __name__ == "__main__":
     try:
         main()
     finally:
+        # 收尾：停掉本测试创建的所有服务（防止残留 systemd unit/端口）
+        try:
+            from sandbox.service import delete_service, list_service_rows
+
+            for row in list_service_rows():
+                try:
+                    delete_service(row["service_id"], volumes=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # 沙箱产物（uid 1000）用 root 清
         subprocess.run(["sudo", "-n", "rm", "-rf", str(TEST_HOME)], check=False)
         shutil.rmtree(TEST_HOME, ignore_errors=True)
