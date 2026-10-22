@@ -294,13 +294,14 @@ def _dedupe_rules() -> int:
             if f"{_COMMENT}:" not in line:
                 continue
             comment = ""
-            for part in line.split():
-                if part.startswith("--comment"):
-                    comment = part
+            parts = line.split()
+            for i, part in enumerate(parts):
+                if part == "--comment" and i + 1 < len(parts):
+                    comment = parts[i + 1]     # 取 comment 的**值**，不是 "--comment" 本身
             key = comment or line
             if key in seen:
                 spec = line.split()
-                args = [t for t in spec if t != "-A"]
+                args = spec[2:]        # 跳过 "-A <chain>"
                 _iptables(table, "-D", chain, *args, check=False)
                 removed += 1
             else:
