@@ -172,6 +172,16 @@ def install():
     except OSError:
         return False
     try:
+        # 关键：prctl 的参数必须声明成 64 位 —— 默认 ctypes 会当 32 位 int，
+        # 指针被截断 → 内核读到垃圾 → 装不上过滤器
+        libc.prctl.restype = ctypes.c_int
+        libc.prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
         if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             return False
         n = len(prog) // 8
