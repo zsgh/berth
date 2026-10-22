@@ -234,15 +234,17 @@ cmd_status() {
   if [[ -f "$TOKEN_FILE" ]]; then
     info "本机令牌文件: $TOKEN_FILE（$(stat -c '%a %U:%G' "$TOKEN_FILE" 2>/dev/null || echo '?')）"
   fi
-  if [[ -f "$TLS_CRT" ]]; then
+  if [[ -f "$TLS_CRT" && ! -f "$TLS_DIR/tls.off" ]]; then
     info "TLS: 已启用（$TLS_CRT）"
+  elif [[ -f "$TLS_CRT" ]]; then
+    info "TLS: 证书在，但当前是 HTTP（$0 tls 开 / $0 tls-off 关）"
   else
     info "TLS: 未启用（公网暴露建议跑 $0 tls）"
   fi
 
   say "健康"
   local scheme="http"
-  [[ -f "$TLS_CRT" ]] && scheme="https"
+  if [[ -f "$TLS_CRT" && ! -f "$TLS_DIR/tls.off" ]]; then scheme="https"; fi
   curl -sfk -m 3 "$scheme://127.0.0.1:$BERTH_PORT/health" 2>/dev/null | sed 's/^/   /' || echo "   连不上（$scheme://127.0.0.1:$BERTH_PORT）"
 
   say "服务"
@@ -301,7 +303,7 @@ cmd_share() {
   local token
   token=$(read_token) || die "找不到超级管理员令牌"
   local scheme="http"
-  [[ -f "$TLS_CRT" ]] && scheme="https"
+  if [[ -f "$TLS_CRT" && ! -f "$TLS_DIR/tls.off" ]]; then scheme="https"; fi
   local body
   body=$(python3 -c "import json,sys; print(json.dumps({'owner': sys.argv[1]}))" "$owner")
   echo "把 $name 的归属设为 ${owner:-（全局共享）}…"
