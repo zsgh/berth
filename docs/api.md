@@ -545,17 +545,36 @@ curl -s -X POST localhost:9000/images -H 'Content-Type: application/json' \
 
 删除一个镜像（只删 berth 自己管的 `rootfs-*` 目录）。
 
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `force` | false | 镜像正被服务使用时：**先停掉这些服务**（保留服务记录和数据卷）再删 |
+
+流程（`force=true`）：
+
+1. 找出占用者（按**解析后的镜像路径**比较 —— 老记录没有 `spec` 列，会回退到模板的 `image` 字段）
+2. 逐个 `stop`（**停，不删** —— 服务记录和数据卷都留着）
+3. 等内核释放 overlay 挂载（最多 3s）
+4. 删镜像目录
+
 拒绝（`409`）的情况：
 
 - `base` 镜像（其它镜像都基于它）
 - 不在受管范围内（`images.yaml` 指向别处的镜像）
-- **正被服务使用**（含 0.3.0 之前创建的老记录 —— 那种记录没有 `spec` 列，会回退到模板的 `image` 字段）
-- **正被内核挂载引用**（扫 `/proc/self/mountinfo` 的 overlay `lowerdir`）—— 硬保护
+- 正被服务使用（**不带 `force` 时**：提示是哪些服务在用、让调用方决定要不要 force）
+- **正被内核挂载引用**（扫 `/proc/self/mountinfo` 的 overlay `lowerdir`）—— 硬保护，停完还挂着就拒绝
 - 正在构建中
 
 ```bash
 curl -s -X DELETE localhost:9000/images/myimg
-# {"name":"myimg","path":"/opt/berth/rootfs-myimg","deleted":true,"size_bytes":193694064}
+# {"name":"myimg","path":"/opt/berth/rootfs-myimg","deleted":true,"size_bytes":193694064,"stopped_services":[]}
+
+# 被服务占用时：先看提示
+curl -s -X DELETE localhost:9000/images/redis
+# 409 {"detail":"镜像 'redis' 正被服务使用（my-redis）：加 force=true 会先停止这些服务（保留记录和数据卷）再删除"}
+
+# 确认后：自动停掉占用者再删
+curl -s -X DELETE "localhost:9000/images/redis?force=true"
+# {"name":"redis","deleted":true,"stopped_services":["my-redis"]}
 ```
 
 删除用 `BERTH_ALLOW_IMAGE_DELETE`（默认 `1`）控制。
