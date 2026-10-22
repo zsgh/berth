@@ -416,7 +416,7 @@
             <label>名字<input name="imgName" x-model="images.form.name" placeholder="myimg（小写字母/数字/短横线）"></label>
             <label>基础镜像
               <select name="imgBase" x-model="images.form.base">
-                <template x-for="i in (info?.images || {})" :key="i"><option :value="i" x-text="i"></option></template>
+                <template x-for="i in Object.keys(info?.images || {})" :key="i"><option :value="i" x-text="i"></option></template>
               </select>
             </label>
             <label>apt 包（空格分隔）<input name="imgPackages" x-model="images.form.packages" placeholder="jq ripgrep"></label>
