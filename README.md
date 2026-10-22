@@ -218,6 +218,26 @@ curl -s -X DELETE localhost:9000/images/myimg
 > 构建在 mount/pid/uts/ipc namespace 里跑，装的包起的后台进程不会漏到宿主。
 > 删除会拒绝：base 镜像、正被服务用的（含老记录）、正被内核 overlay 挂载引用的。
 
+## 网络隔离（M2）
+
+**每个 user 一个 network namespace**（不是每沙箱一个）：
+
+- user 内：沙箱与服务同 ns → `127.0.0.1:16379` 语义保留，现有测试一行不用改
+- user 间：不同网段 → 防火墙按 IP 隔离 → **端口级隔离**
+- 沙箱 → **berth 自己的 API**：物理上连不到（沙箱的 `127.0.0.1` 是它自己）→ token 降级成第二道防线
+- 出网：NAT（MASQUERADE）正常
+
+| 沙箱里探测 | 结果 |
+|---|---|
+| 自己的服务 `127.0.0.1:16379` | ✅ 通 |
+| 别人的服务（同机不同端口） | ❌ 不通 |
+| berth API `127.0.0.1:9000` | ❌ 不通 |
+| 别的 user 网段 | ❌ 不通 |
+| 出网 | ✅ 通 |
+
+**开关**：`BERTH_NETNS=0` → 全部退回 host 网络（向后兼容 / 出问题一键回退）。
+`BERTH_HOST_BLOCK_PORTS=22,9000` → 沙箱网段不能访问的宿主端口。
+
 ## 服务模板（templates/*.yaml）
 
 模板 ≈ 「`docker run` 的固定参数模板」，字段语义与 Kubernetes 对齐：

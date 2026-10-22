@@ -269,6 +269,74 @@ systemd 的规则是「**更具体的条目优先**」，所以 `Deny=any` + `Al
 1. 在宿主机上给每个项目用独立的 network namespace / 独立 VM（推荐，隔离最彻底）；
 2. 或用 nftables 按 cgroup id 匹配端口（方案 B）。
 
+## 8b. per-user 网络隔离（M2）
+
+### 8b.1 为什么是"每 user 一个 netns"而不是"每沙箱一个"
+
+每沙箱一个 netns 会**打断 `127.0.0.1` 语义**：测试里 `psql -h 127.0.0.1 -p 16379`
+连的是"沙箱自己"，不是被测服务 → 得给每个 (沙箱 × 被测服务) 做端口转发 → 复杂度爆炸。
+
+**每 user 一个**则两全其美：
+
+- user 内：沙箱与服务在同一个 ns → `127.0.0.1:16379` 就是本 user 的服务 ✅ 现有用例一行不用改
+- user 间：不同网段 → 防火墙按 IP 隔离 → **端口级隔离**（同机不同端口的问题解决）
+
+### 8b.2 拓扑与规则
+
+```
+宿主 eth0 ──┐
+            │ PREROUTING DNAT :16380 → 10.200.2.2:16380（外部客户端）
+   ┌────────┴──────────┐
+   │ 宿主 netns         │
+   │  v2h 10.200.2.1/24 ── v2n │
+   │  FORWARD 10.200/16 → 10.200/16 DROP   （user 之间不通）│
+   │  INPUT   10.200/16 → 22,9000 DROP     （沙箱连不到 sshd / berth API）│
+   │  POSTROUTING -s 10.200.2.0/24 MASQUERADE（出网）       │
+   └────────────────────┘
+        ┌───────────────┴──────────────┐
+        │ netns berth-<user>           │
+        │  10.200.2.2/24               │
+        │  沙箱 + 服务都在这里           │
+        │  127.0.0.1:16380 = 本 user 的服务 │
+        └──────────────────────────────┘
+```
+
+宿主本地访问服务（`127.0.0.1:16380`）走 hairpin：nat OUTPUT DNAT +
+POSTROUTING 把源地址 `127.0.0.1` 改成网关 IP（否则 ns 里的回包走不通），
+需要 `net.ipv4.conf.all.route_localnet=1`。
+
+### 8b.3 实测隔离矩阵（VM 上跑的）
+
+| 沙箱（user=shop）里探测 | 期望 | 结果 |
+|---|---|---|
+| 自己的服务 `127.0.0.1:16380` | OK | ✅ OK |
+| 别人的服务 `127.0.0.1:16381` | FAIL | ✅ ConnectionRefused |
+| **berth 自己的 API** `127.0.0.1:9000` | FAIL | ✅ ConnectionRefused |
+| 宿主的 sshd `127.0.0.1:22` | FAIL | ✅ ConnectionRefused |
+| 别人的服务 IP `10.200.3.2:16381` | FAIL | ✅ 超时（FORWARD DROP） |
+| 别的 user 网段 `10.200.1.2:22` | FAIL | ✅ 超时 |
+| 出网 `https://example.com` | OK | ✅ 200 |
+
+> **berth API 物理上连不到了**（沙箱的 `127.0.0.1` 是它自己）→ token 从"唯一防线"
+> 降级成"第二道防线"。
+
+### 8b.4 踩过的坑
+
+1. **veth 的 ns 侧没搬进 netns**：`ip link add` 两端都在宿主 → ns 里只有 lo。
+   要 `ip link set <ns_veth> netns <ns>`。
+2. **规则重复添加**：用 `iptables -C chain -m comment --comment X` 查存在性永远查不到
+   （实际规则还带别的匹配条件）→ 每次都加一遍。改成"列出链 → 精确匹配 comment"。
+3. **`-D` 的参数构造**：`iptables -S` 的输出是 `-A <chain> <rule>`，要跳过前两个；
+   而且 comment 的值带引号，要去掉。
+4. **MASQUERADE 匹配错接口**：流量是**从 veth 进、从 eth0 出** → 规则写 `-o <veth>`
+   匹配不到 → 源地址没被 NAT → 出网没回包。只按**源地址**匹配。
+5. **`route_localnet`**：宿主本地访问 127.0.0.1 被 DNAT 到网段地址时要开这个。
+
+### 8b.5 开关与回滚
+
+`BERTH_NETNS=0` → 全部退回 host 网络（老行为）。规则重建是幂等的：
+daemon 启动时按 DB 重建 netns 与规则（`netns.rebuild_all()`），并清理重复规则。
+
 ## 9. 异步执行（B4）
 
 一次执行拆成三步（`sandbox/overlayfs.py`）：
