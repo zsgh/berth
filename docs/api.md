@@ -1,8 +1,21 @@
 # berth API
 
-Base URL：`http://localhost:9000`（uvicorn 默认端口 9000）
+Base URL：`http://127.0.0.1:9000`（默认只监听本机；对外监听要显式配置 `BERTH_HOST`）
 
 所有接口返回 JSON。出错时返回 `{"detail": "..."}`。
+
+## 鉴权（B1）
+
+配置了 `BERTH_TOKEN` 后，除 `/health` 和 `/ui/*` 外的所有接口都要带 Bearer token：
+
+```bash
+curl -H "Authorization: Bearer $BERTH_TOKEN" http://127.0.0.1:9000/system/info
+```
+
+- 没配置 `BERTH_TOKEN` → 不鉴权（保持旧行为），启动日志会打警告
+- token 不对 → `401`（带 `WWW-Authenticate: Bearer`）
+- `/health` 永远免鉴权（探活用）
+- `/ui/*` 静态资源免鉴权（登录页要能加载；静态文件里没有敏感数据）
 
 ---
 
@@ -19,16 +32,23 @@ Base URL：`http://localhost:9000`（uvicorn 默认端口 9000）
 | `code` | string? | - | 源码字符串 |
 | `cmd` | string[]? | - | 直接执行的 argv，如 `["/bin/ls", "-la"]` |
 | `language` | string? | 自动 | `python`（默认）/ `bash` / `sh`；给了 `code` 才有效 |
-| `image` | string | `base` | 镜像名（base / redis / mysql / 自定义，见「镜像」一节） |
-| `timeout` | int | 30 | 超时秒数（1-600），超时强制终止 |
-| `task_id` | string? | 自动 uuid | 同一 task_id 共享 `/workspace` |
-| `memory_mb` | int | 256 | 内存上限 |
-| `cpu_percent` | int | 50 | CPU 配额 |
+| `image` | string | `base` | 镜像名（base / redis / mysql / postgres / runner / 自定义，见「镜像」一节） |
+| `timeout` | int | 30 | 超时秒数（上限见 `/system/info`，默认 600） |
+| `task_id` | string? | 自动 uuid | 同一 task_id 共享 `/workspace`（只允许字母/数字/`.`/`_`/`-`） |
+| `memory_mb` | int | 256 | 内存上限（上限见 `/system/info`，默认 4096） |
+| `cpu_percent` | int | 50 | CPU 配额（上限见 `/system/info`，默认 400） |
+| `processes` | int? | 512 | 进程数上限（cgroup TasksMax） |
+| `async` | bool | false | 异步执行：立即返回 run id，不阻塞（B4） |
+| `network` | object? | `host` | 网络策略：`{"mode": "host\|none\|allow", "allow": [...]}`（B2） |
+| `mounts` | object[]? | - | 只读挂载：`[{"source": "/srv/berth-mounts/app", "target": "/app"}]`（B3） |
+| `labels` | object? | - | 标签：`{"project": "foo", "run": "1"}`（B12） |
+
+超过配置上限的参数直接返回 `400`（例如 `timeout 超过上限（3600s > 600s）`）。
 
 解释器选择顺序：`language` 参数 → 代码首行 shebang（如 `#!/bin/bash`、`#!/usr/bin/env python3`）→ 默认 python。
 非 python/bash/sh 的解释器也能用，前提是镜像里有（写在 shebang 里即可）。
 
-**响应**
+**响应**（同步）
 
 ```json
 {
@@ -39,13 +59,33 @@ Base URL：`http://localhost:9000`（uvicorn 默认端口 9000）
   "artifacts": ["out.txt"],
   "task_id": "test-1",
   "image": "base",
-  "language": "python"
+  "language": "python",
+  "status": "finished",
+  "network": {"mode": "host", "allow": []},
+  "labels": {}
 }
 ```
 
 - `exit_code`：进程退出码；超时被强杀为 `-1`；被信号杀死为 `128+signal`（如 OOM → 137）
 - `artifacts`：`/workspace` 下的文件列表（相对路径）
 - `language`：`cmd` 模式为 `null`；shebang 模式形如 `shebang:/bin/bash`
+- `status`：`finished` / `timeout` / `killed` / `error`
+
+**响应**（`"async": true`）
+
+```json
+{
+  "task_id": "auto-3f2a9c",
+  "run_id": "1a2b3c4d",
+  "status": "running",
+  "image": "runner",
+  "network": {"mode": "none", "allow": []},
+  "labels": {"project": "foo"},
+  "timeout": 900,
+  "started_at": 1760000000.12,
+  "unit": "berth-run-1a2b3c4d"
+}
+```
 
 **示例**
 
@@ -65,36 +105,141 @@ curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
 # 换镜像跑
 curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
   -d '{"code": "print(1)", "image": "redis"}'
+
+# 断网执行
+curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
+  -d '{"code": "print(1)", "network": {"mode": "none"}}'
+
+# 只允许访问白名单（域名会先解析成 IP）
+curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
+  -d '{"code": "...", "network": {"mode": "allow", "allow": ["10.0.0.0/8", "example.com"]}}'
+
+# 异步执行（15 分钟的大任务）
+curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
+  -d '{"code": "...", "async": true, "timeout": 900, "memory_mb": 2048}'
 ```
 
-沙箱环境：host 网络（可直连外网）；文件系统 = 只读镜像 + 每次独立可写层；
+沙箱环境：host 网络（可直连外网，或按 `network` 限制）；文件系统 = 只读镜像 + 每次独立可写层；
 以 uid 1000 运行、capability 清空、cgroup 限内存/CPU/进程数；结束后 cgroup 残留进程一并清理。
 
 ### `GET /scripts`
 
-最近执行列表（`?limit=100`，1-1000）。
+执行列表（分页 + 过滤）。
 
-### `GET /scripts/{task_id}`
-
-某次执行的历史记录（同 task_id 记录为最新一次）。不存在返回 404。
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `limit` | 100 | 返回条数（1-1000） |
+| `status` | - | `running` / `finished` / `timeout` / `killed` / `error` |
+| `image` | - | 按镜像过滤 |
+| `since` | - | 只看这个时间之后创建的（ISO 字符串） |
+| `cursor` | - | 游标分页：上一页最后一条的 `created_at` |
+| `label` | - | 标签过滤，可重复：`?label=project=foo&label=run=1`（AND 语义） |
 
 ```json
 {
-  "task_id": "t-1",
-  "code": "...",
-  "stdout": "done\n",
-  "stderr": "",
-  "exit_code": 0,
-  "duration_ms": 76,
-  "artifacts": ["out.txt"],
-  "created_at": "...",
-  "finished_at": "..."
+  "runs": [
+    {
+      "task_id": "t-1",
+      "code": "...",
+      "stdout": "done\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_ms": 76,
+      "artifacts": ["out.txt"],
+      "created_at": "2026-01-01T10:00:00+00:00",
+      "finished_at": "2026-01-01T10:00:01+00:00",
+      "status": "finished",
+      "image": "base",
+      "network": {"mode": "host", "allow": []},
+      "labels": {"project": "foo"}
+    }
+  ],
+  "count": 1,
+  "next_cursor": "2026-01-01T10:00:00+00:00"
 }
+```
+
+### `GET /scripts/{task_id}`
+
+某次执行的状态 / 历史记录。还在跑 → `status: "running"` 并带实时输出。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `offset` | 0 | stdout 增量偏移：只返回 `stdout[offset:]`，并回 `stdout_offset` |
+
+不存在返回 404。
+
+### `POST /scripts/{task_id}/cancel`
+
+取消正在跑的执行（杀 cgroup + 停 unit）。没在跑返回 404。
+
+```json
+{"task_id": "t-1", "status": "killed", "cancelled": true}
 ```
 
 ### `POST /scripts/{task_id}/clear`
 
 清空该任务的 `/workspace`（下次执行是全新环境）。
+
+### `GET /scripts/{task_id}/stream`
+
+实时输出（SSE，`text/event-stream`）。事件类型：`stdout` / `stderr` / `status` / `done`。
+token 走请求头（不放 URL）。
+
+### `GET /scripts/{task_id}/tree`
+
+workspace 文件树（带大小 / mime），UI 的产物列表用它。
+
+```json
+{
+  "task_id": "t-1",
+  "workspace": "/var/lib/berth/scripts/t-1/workspace",
+  "files": [
+    {"path": "report.html", "name": "report.html", "is_dir": false,
+     "size": 1234, "mime": "text/html", "modified_at": "2026-01-01T10:00:00"}
+  ]
+}
+```
+
+### `PUT /scripts/{task_id}/files`
+
+上传文件到 `/workspace`（B3）。
+
+- `multipart/form-data`：多个文件（`filename` 是 workspace 里的相对路径），也可以直接传 tar 包（自动解包）
+- 其它 content-type：按原始 body 处理（tar 包；带 `?filename=` 时当单文件写）
+
+```bash
+# 多文件
+curl -X PUT localhost:9000/scripts/t-1/files \
+  -F 'files=@tests/test_a.py' -F 'files=@tests/test_b.py'
+
+# tar 包（自动解包）
+tar czf tests.tgz tests/
+curl -X PUT localhost:9000/scripts/t-1/files --data-binary @tests.tgz
+```
+
+返回：`{"task_id": "t-1", "workspace": "...", "files": ["tests/test_a.py", ...]}`
+
+安全：task_id 只能是安全字符；解包拒绝绝对路径、`..` 穿越、越界软链接。
+
+### `GET /scripts/{task_id}/files`
+
+把 workspace（或 `?path=` 指定的子目录）打包成 tar 下载。
+
+### `GET /scripts/{task_id}/files/{path}`
+
+下载单个文件。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `preview` | false | `true` = 内联预览（HTML 会带严格 CSP） |
+
+下载响应带 `Content-Disposition` 和 `X-Content-Type-Options: nosniff`。
+HTML 预览额外带 `Content-Security-Policy: sandbox; default-src 'none'`（只能放在 `<iframe sandbox>` 里看）。
+
+### `DELETE /scripts/{task_id}/files/{path}`
+
+删 workspace 里的文件 / 目录。
 
 ---
 
@@ -110,7 +255,7 @@ curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
 | 现状 | 行为 |
 |---|---|
 | 名字不存在 | 创建，`"reused": false` |
-| 已在运行 | 直接返回现有实例，`"reused": true`（不新建、不重启） |
+| 已在运行 | 直接返回现有实例，`"reused": true`（不新建、不重启、**不重复执行 init**） |
 | 已停止/掉线 | 原样再起，复用数据卷，`"reused": true` |
 | 名字被不同模板占用 | `409`（换名字，或先 DELETE） |
 
@@ -118,7 +263,41 @@ curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `template` | string | 模板名，如 `redis` / `mysql` |
+| `template` | string? | 模板名，如 `redis` / `mysql` / `postgres` |
+| `spec` | object? | 内联模板（起"被测服务"用；与 `template` 二选一，B11） |
+| `overrides` | object? | 覆盖模板：`env` / `args` / `command` / `resources` / `ports` / `network` / `mounts` / `healthcheck`（B5） |
+| `init` | object? | 健康检查通过后执行的初始化（SQL / 脚本 / workspace 文件）（B5） |
+| `labels` | object? | 标签（B12） |
+| `task_id` | string? | 关联任务：服务 workspace 与该任务共享（`init.file` 从这里读） |
+
+`overrides` 合并规则：`env` / `resources` / `healthcheck` 是**合并**（覆盖同名键），
+`args` / `command` / `ports` / `mounts` 是**整体替换**。
+
+`init` 结构：
+
+| 字段 | 说明 |
+|---|---|
+| `sql` | SQL 文本（写进 workspace 的 `.berth-init.sql`，用模板的 init 命令执行） |
+| `script` | 脚本（写进 `.berth-init.sh`；模板没定义 init 段时用 `sh -c` 执行） |
+| `file` | 服务 workspace（或挂载白名单目录）里的文件，内容当 SQL / 脚本 |
+| `env` | 初始化时额外的环境变量 |
+| `timeout` | 初始化超时秒数 |
+| `image` | 用哪个镜像跑初始化（默认服务镜像） |
+
+模板里的 `init` 段决定"怎么执行"：
+
+```yaml
+init:
+  image: postgres
+  command: ["/usr/bin/psql"]
+  args: ["-h", "127.0.0.1", "-p", "{port}", "-U", "postgres", "-d", "postgres", "-f", "{init_file}"]
+  env:
+    PGPASSWORD: "{POSTGRES_PASSWORD}"
+  timeout: 60
+```
+
+可用占位符：`{port}` `{service_id}` `{name}` `{init_file}` `{init_sql}` `{init_script}`，
+以及模板 `env` 里的键（如 `{POSTGRES_PASSWORD}`）。
 
 **响应**
 
@@ -135,16 +314,29 @@ curl -s -X POST localhost:9000/scripts/run -H 'Content-Type: application/json' \
   "dir": "/var/lib/berth/services/svc-16b83efe",
   "persist": 1,
   "reused": false,
+  "labels": {"project": "foo"},
+  "network": {"mode": "host", "allow": []},
+  "spec": { "...生效的完整模板..." },
+  "init_result": {"exit_code": 0, "stdout": "...", "duration": 0.4},
   "created_at": "...",
   "updated_at": "..."
 }
 ```
 
-错误：`400` 模板不存在/缺字段/镜像没构建；`409` 名字冲突；`504` 健康检查超时（会自动清理）。
+错误：`400` 模板不存在/缺字段/镜像没构建/参数非法；`409` 名字冲突；`504` 健康检查超时（会自动清理）；
+`500` 初始化失败（服务会被清理）。
 
 ```bash
-curl -s -X PUT localhost:9000/services/my-redis \
-  -H 'Content-Type: application/json' -d '{"template": "redis"}'
+# 起两个 postgres：库名 / 密码 / 初始数据各不相同
+curl -s -X PUT localhost:9000/services/app1-db \
+  -H 'Content-Type: application/json' \
+  -d '{"template":"postgres","overrides":{"env":{"POSTGRES_DB":"app1","POSTGRES_PASSWORD":"p1"}},
+       "init":{"sql":"CREATE TABLE IF NOT EXISTS users(id int);"}}'
+
+curl -s -X PUT localhost:9000/services/app2-db \
+  -H 'Content-Type: application/json' \
+  -d '{"template":"postgres","overrides":{"env":{"POSTGRES_DB":"app2","POSTGRES_PASSWORD":"p2"}},
+       "init":{"sql":"CREATE TABLE IF NOT EXISTS orders(id int);"}}'
 ```
 
 ### `GET /services`
@@ -156,6 +348,7 @@ curl -s -X PUT localhost:9000/services/my-redis \
 | `all` | false | `true` 含历史（stopped/crashed）—— 等价 `docker ps -a` |
 | `status` | - | 精确过滤：`starting` / `running` / `stopped` / `crashed` |
 | `usage` | true | `false` 跳过用量统计（服务多时更快） |
+| `label` | - | 标签过滤，可重复：`?label=project=foo` |
 
 每行附两个用量视图：`usage`（机器可读原始值）和 `usage-h`（人类可读，`-h` = human）。
 
@@ -174,13 +367,9 @@ curl -s -X PUT localhost:9000/services/my-redis \
 }
 ```
 
-- `memory` 是实时值会起伏；`memory_limit` 是硬上限（超了会被 OOM 杀）
-- `cpu_time` 是累计消耗：跑很久但只有 1.1s 说明服务基本空闲（想看百分比可对比两次采样的差值）
-- 服务停止后 `memory/memory_limit/cpu_time` 为 null，`disk` 仍然有效（数据还在）
-
 ### `GET /services/{ref}`
 
-单个服务详情（同样带 `usage`）。不存在返回 404。
+单个服务详情（同样带 `usage`，另含 `spec` / `init_result` / `network` / `labels`）。不存在返回 404。
 
 ### `POST /services/{ref}/stop`
 
@@ -189,7 +378,28 @@ curl -s -X PUT localhost:9000/services/my-redis \
 ### `POST /services/{ref}/start`
 
 把**已停止**的服务原样再起：复用原目录与数据卷，端口优先复用上次的。
-已在运行会返回 400。
+已在运行会返回 400。重启会**重放 init**。
+
+### `POST /services/{ref}/reset`
+
+重置服务（B8）：停止 → 清数据卷 → 重新初始化（重放 `init`）→ 启动。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `keep_backup` | false | `true` 时把旧数据卷挪到 `<dir>/volumes.backup.<ts>`（不删） |
+
+```json
+{
+  "service_id": "svc-16b83efe",
+  "name": "my-redis",
+  "status": "running",
+  "port": 16379,
+  "reset_duration_ms": 842,
+  "init": {"sql": "..."},
+  "init_result": {"exit_code": 0, "...": "..."},
+  "backup": null
+}
+```
 
 ### `DELETE /services/{ref}`
 
@@ -202,6 +412,26 @@ curl -s -X PUT localhost:9000/services/my-redis \
 ```bash
 curl -s -X DELETE localhost:9000/services/my-redis                 # 删记录，卷留着
 curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据一起删干净
+```
+
+### `GET /services/{ref}/logs`
+
+服务日志（B9，封装 `journalctl -u berth-svc-{id}`）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `tail` | 100 | 取最后 N 行（1-10000） |
+| `since` | - | `journalctl --since` 的时间表达式（如 `-1h`） |
+| `follow` | false | `true` = SSE 实时跟随 |
+
+```json
+{
+  "service_id": "svc-16b83efe",
+  "name": "my-redis",
+  "unit": "berth-svc-16b83efe",
+  "text": "…journal 输出…",
+  "lines": ["…", "…"]
+}
 ```
 
 ---
@@ -226,7 +456,93 @@ curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据�
 ]
 ```
 
-清理孤儿卷：记录没了就直接 `sudo rm -rf <path>`。
+### `DELETE /volumes/{service_id}`
+
+**只允许清理孤儿卷**（记录已删但卷还在磁盘上）。非孤儿卷返回 `409`。
+
+```bash
+curl -s -X DELETE localhost:9000/volumes/svc-652bafb3
+```
+
+---
+
+## 镜像 / 模板
+
+### `GET /images`
+
+已发现的镜像（只读）。
+
+```json
+[{"name": "base", "path": "/opt/berth/rootfs", "size_bytes": 314572800}]
+```
+
+### `GET /templates` / `GET /templates/{name}`
+
+模板名列表 / 模板内容（校验过的）。
+
+### `POST /templates/validate`
+
+校验一份模板（YAML 文本或 JSON 对象）。合法返回 `{"valid": true, "template": {...}}`，
+不合法返回 `400` + `detail`（带迁移提示）。
+
+---
+
+## 系统信息
+
+### `GET /system/info`
+
+版本、配置的上限、白名单挂载目录、镜像列表、网络策略能力。
+
+```json
+{
+  "version": "0.3.0",
+  "limits": {"timeout_seconds": 600, "memory_mb": 4096, "cpu_percent": 400, "processes": 512},
+  "mount_roots": ["/srv/berth-mounts"],
+  "images": {"base": "/opt/berth/rootfs"},
+  "templates": ["mysql", "postgres", "redis"],
+  "network": {
+    "modes": ["host", "none", "allow"],
+    "mechanism": "systemd IPAddressDeny/IPAddressAllow (cgroup v2 + BPF)",
+    "cgroup_v2": true,
+    "supported": true
+  },
+  "auth": {"enabled": true, "scheme": "Bearer"},
+  "ui": {"enabled": true, "path": "/ui/"},
+  "home": "/var/lib/berth"
+}
+```
+
+### `GET /system/stats`
+
+宿主 CPU / 内存 / `BERTH_HOME` 所在磁盘的占用 + berth 自己的统计 + 告警。
+
+```json
+{
+  "cpu": {"percent": 12.3, "cores": 8, "load": [0.5, 0.4, 0.3]},
+  "memory": {"total_bytes": 16777216000, "used_bytes": 8000000000, "available_bytes": 8777216000, "percent": 47.7},
+  "disk": {"path": "/var/lib/berth", "total_bytes": 107374182400, "used_bytes": 21474836480, "free_bytes": 85899345920, "percent": 20.0},
+  "services": {"active": 2, "total": 5},
+  "runs": {"last_24h": 12, "failed_24h": 1},
+  "volumes": {"total": 3, "orphan": 1},
+  "alerts": ["磁盘占用 92%（/var/lib/berth），接近写满"]
+}
+```
+
+---
+
+## 操作审计
+
+### `GET /events`
+
+所有写操作的审计记录（`actor` 是 token 的短哈希，不落明文）。
+
+```json
+[
+  {"id": 42, "ts": "2026-01-01T10:00:00+00:00", "actor": "token:930bbdc51b6a",
+   "action": "PUT /services/my-redis", "target": "my-redis",
+   "method": "PUT", "path": "/services/my-redis", "status": 200, "detail": null}
+]
+```
 
 ---
 
@@ -235,8 +551,12 @@ curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据�
 ### `GET /health`
 
 ```json
-{"status": "ok"}
+{"status": "ok", "version": "0.3.0"}
 ```
+
+### `GET /ui/`
+
+管理界面（静态页，见 [docs/ui.md](ui.md)）。
 
 ---
 
@@ -255,6 +575,9 @@ curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据�
 
 3. 自动发现：`BERTH_ROOTFS`（默认 `/opt/berth/rootfs`）的同级 `rootfs-*` 目录 ——
    正好匹配 `scripts/setup_rootfs.sh` 的产物（`rootfs-redis` → 名字 `redis`）。
+
+内置镜像：`base`（python3）、`redis`、`mysql`（MariaDB）、`postgres`（PostgreSQL 15）、
+`runner`（pytest / httpx / Playwright + Chromium）；`--stack node,go,java` 可按需构建被测运行时。
 
 ---
 
@@ -284,8 +607,29 @@ curl -s -X DELETE "localhost:9000/services/my-redis?volumes=true"  # 连数据�
 | `env` | map | - | 环境变量（值同样支持占位符） | `environment` |
 | `ports` | list | ✔ | `[{internal, external_range}]`，宿主端口**动态分配** | `-p`（分配区间而非写死） |
 | `volumes` | list | - | `[{internal, persist}]`，数据卷在服务目录 `volumes/` 下 | `volumes` |
-| `healthcheck` | map | - | `{type: tcp, port, timeout, interval}` | `healthcheck`（仅 tcp） |
+| `healthcheck` | map | - | `{type: tcp\|http, port, timeout, interval, path, expect_status}` | `healthcheck` |
 | `resources` | map | - | `{memory_mb, cpu_percent}`（100 = 1 核） | `--memory` / `--cpus` |
+| `network` | map | - | `{mode: host\|none\|allow, allow: [...]}`（B2） | - |
+| `init` | map | - | 初始化怎么执行（`{image, command, args, env, timeout}`，B5） | - |
+| `mounts` | list | - | 只读挂载 `[{source, target, read_only}]`（白名单内，B11） | `-v ro` |
+
+### 健康检查
+
+```yaml
+healthcheck:
+  type: tcp          # tcp（默认）或 http
+  port: 5432
+  timeout: 20
+  interval: 0.3
+---
+healthcheck:
+  type: http         # B10：被测 Web 服务用（tcp 通了不代表应用就绪）
+  port: 3000
+  path: /healthz
+  expect_status: 200 # 可以是数组 [200, 204]
+  timeout: 30
+  interval: 0.5
+```
 
 ### 校验
 

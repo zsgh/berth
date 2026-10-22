@@ -1,11 +1,16 @@
 """SQLite 元数据存储（任务 1.3 / 2.2 / 3.x）。
 
-记录三类数据：
-    runs     —— 每次脚本执行的历史（审计 / 查询）
+记录五类数据：
+    runs     —— 每次脚本执行的历史（审计 / 查询）+ 异步执行的实时状态
     services —— 长驻服务的元数据（状态恢复的依据）
     ports    —— 端口分配表（服务停止时释放）
+    events   —— 操作审计（谁 / 何时 / 对什么做了什么）
+    labels   —— 通过 runs.labels / services.labels（JSON）内嵌，不单独建表
 
 数据库默认在 /var/lib/berth/daemon.db（可用 BERTH_DB 覆盖）。
+
+表结构是**懒建 + 增量迁移**的：老库启动时自动补齐新列（`ALTER TABLE ADD COLUMN`），
+不需要手工迁移。
 """
 from __future__ import annotations
 
@@ -22,6 +27,31 @@ DB_PATH = Path(os.environ.get("BERTH_DB", str(BASE_DIR / "daemon.db")))
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ─────────────────────────── 表结构 ───────────────────────────
+
+# 老版本 → 新版本补的列（列名 → 列定义）
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "runs": {
+        "status": "TEXT DEFAULT 'finished'",   # running/finished/timeout/killed/error
+        "image": "TEXT",
+        "network": "TEXT",                      # JSON：网络策略
+        "labels": "TEXT",                       # JSON：标签
+        "timeout": "INTEGER",
+        "started_at": "TEXT",
+        "updated_at": "TEXT",
+    },
+    "services": {
+        "labels": "TEXT",                       # JSON：标签
+        "overrides": "TEXT",                    # JSON：请求里的 overrides
+        "spec": "TEXT",                         # JSON：生效的完整模板
+        "init_spec": "TEXT",                    # JSON：初始化定义
+        "init_result": "TEXT",                  # JSON：初始化执行结果
+        "network": "TEXT",                      # JSON：网络策略
+        "task_id": "TEXT",                      # 关联的任务（共享 workspace）
+    },
+}
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:
@@ -69,6 +99,37 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      TEXT NOT NULL,
+                actor   TEXT,               -- token 标识（短哈希），匿名时为 'anonymous'
+                action  TEXT NOT NULL,      -- 动词（create/delete/...）
+                target  TEXT,               -- 操作对象（服务名 / task_id / ...）
+                method  TEXT,
+                path    TEXT,
+                status  INTEGER,
+                detail  TEXT                -- JSON
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_services_name ON services(name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC)")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """给老库补新增的列（幂等）。"""
+    with conn:
+        for table, cols in MIGRATIONS.items():
+            try:
+                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            except sqlite3.DatabaseError:  # pragma: no cover - 表还没建
+                continue
+            for name, decl in cols.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 _SCHEMA_READY = False
@@ -91,6 +152,7 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=15000")
     if not _SCHEMA_READY:
         _create_tables(conn)
+        _migrate(conn)
         _SCHEMA_READY = True
     return conn
 
@@ -100,26 +162,59 @@ def init_db() -> None:
     connect().close()
 
 
+# ─────────────────────────── JSON 小工具 ───────────────────────────
+
+
+def _load_json(raw: str | None, default):
+    if raw is None or raw == "":
+        return default
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return default
+    return default if value is None else value
+
+
+def _dump_json(value) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _labels_from_row(row) -> dict:
+    d = dict(row)
+    d["labels"] = _load_json(d.get("labels"), {})
+    return d
+
+
 # ─────────────────────────── runs ───────────────────────────
 
 
 def record_run(task_id: str, code: str, result: dict) -> None:
-    """记录一次脚本执行（task_id 已存在则覆盖最新一次）。"""
+    """记录一次脚本执行（task_id 已存在则覆盖最新一次）。
+
+    status=running 时 finished_at 留空（异步执行刚提交、还没结束）。
+    """
     duration_ms = int(round(float(result.get("duration", 0)) * 1000))
-    finished_at = _now()
-    created_at = result.get("created_at") or finished_at
+    status = result.get("status") or "finished"
+    finished_at = result.get("finished_at") or (_now() if status != "running" else None)
+    created_at = result.get("created_at") or _now()
     conn = connect()
     with conn:
         conn.execute(
             """
             INSERT INTO runs (task_id, code, stdout, stderr, exit_code, duration_ms,
-                              artifacts, created_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              artifacts, created_at, finished_at,
+                              status, image, network, labels, timeout, started_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 code=excluded.code, stdout=excluded.stdout, stderr=excluded.stderr,
                 exit_code=excluded.exit_code, duration_ms=excluded.duration_ms,
                 artifacts=excluded.artifacts, created_at=excluded.created_at,
-                finished_at=excluded.finished_at
+                finished_at=excluded.finished_at,
+                status=excluded.status, image=excluded.image, network=excluded.network,
+                labels=excluded.labels, timeout=excluded.timeout,
+                started_at=excluded.started_at, updated_at=excluded.updated_at
             """,
             (
                 task_id,
@@ -128,20 +223,40 @@ def record_run(task_id: str, code: str, result: dict) -> None:
                 result.get("stderr"),
                 result.get("exit_code"),
                 duration_ms,
-                json.dumps(result.get("artifacts", []), ensure_ascii=False),
+                _dump_json(result.get("artifacts", [])) or "[]",
                 created_at,
                 finished_at,
+                result.get("status") or "finished",
+                result.get("image"),                _dump_json(result.get("network")),
+                _dump_json(result.get("labels")) or "{}",
+                result.get("timeout"),
+                result.get("started_at") or created_at,
+                _now(),
             ),
+        )
+    conn.close()
+
+
+def update_run(task_id: str, **fields) -> None:
+    """更新一条执行记录（异步执行的状态流转用）。"""
+    if not fields:
+        return
+    fields["updated_at"] = _now()
+    cols = ", ".join(f"{k}=?" for k in fields)
+    conn = connect()
+    with conn:
+        conn.execute(
+            f"UPDATE runs SET {cols} WHERE task_id=?",
+            (*fields.values(), task_id),
         )
     conn.close()
 
 
 def _run_row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
-    try:
-        d["artifacts"] = json.loads(d.get("artifacts") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        d["artifacts"] = []
+    d["artifacts"] = _load_json(d.get("artifacts"), [])
+    d["labels"] = _load_json(d.get("labels"), {})
+    d["network"] = _load_json(d.get("network"), None)
     return d
 
 
@@ -152,13 +267,79 @@ def get_run(task_id: str) -> dict | None:
     return _run_row_to_dict(row) if row else None
 
 
-def list_runs(limit: int = 100) -> list[dict]:
+def list_runs(
+    limit: int = 100,
+    status: str | None = None,
+    image: str | None = None,
+    since: str | None = None,
+    labels: dict | None = None,
+    cursor: str | None = None,
+) -> list[dict]:
+    """执行列表：支持状态 / 镜像 / 时间 / 标签过滤 + 游标分页。
+
+    cursor = 上一页最后一条的 created_at（ISO 字符串），返回比它更新的记录。
+    """
     conn = connect()
-    rows = conn.execute(
-        "SELECT * FROM runs ORDER BY finished_at DESC LIMIT ?", (max(1, int(limit)),)
-    ).fetchall()
+    sql = "SELECT * FROM runs"
+    where: list[str] = []
+    args: list = []
+    if status:
+        where.append("status=?")
+        args.append(status)
+    if image:
+        where.append("image=?")
+        args.append(image)
+    if since:
+        where.append("created_at>=?")
+        args.append(since)
+    if cursor:
+        where.append("created_at<?")
+        args.append(cursor)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    rows = conn.execute(sql, tuple(args)).fetchall()
     conn.close()
-    return [_run_row_to_dict(r) for r in rows]
+    out = [_run_row_to_dict(r) for r in rows]
+    if labels:
+        out = [r for r in out if match_labels(r.get("labels") or {}, labels)]
+    return out
+
+
+def match_labels(have: dict, want: dict) -> bool:
+    """标签匹配：want 的每个 k=v 都必须在 have 里存在且相等。
+
+    want 的值如果是 None，只要求 key 存在。
+    """
+    for key, value in (want or {}).items():
+        if key not in have:
+            return False
+        if value is None:
+            continue
+        if str(have.get(key)) != str(value):
+            return False
+    return True
+
+
+def parse_label_filters(values: list[str] | None) -> dict:
+    """把 `?label=project=foo` 解析成 {"project": "foo"}。
+
+    - `label=key=value` → 精确匹配
+    - `label=key`      → 只要有这个 key 就算
+    """
+    out: dict[str, str | None] = {}
+    for raw in values or []:
+        for part in str(raw).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                key, _, value = part.partition("=")
+                out[key.strip()] = value.strip()
+            else:
+                out[part] = None
+    return out
 
 
 # ─────────────────────────── services ───────────────────────────
@@ -181,11 +362,26 @@ def record_service(**fields) -> None:
     conn.close()
 
 
+def update_service(service_id: str, **fields) -> None:
+    """更新服务记录的部分字段。"""
+    if not fields:
+        return
+    fields["updated_at"] = _now()
+    cols = ", ".join(f"{k}=?" for k in fields)
+    conn = connect()
+    with conn:
+        conn.execute(
+            f"UPDATE services SET {cols} WHERE service_id=?",
+            (*fields.values(), service_id),
+        )
+    conn.close()
+
+
 def get_service_row(service_id: str) -> dict | None:
     conn = connect()
     row = conn.execute("SELECT * FROM services WHERE service_id=?", (service_id,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _labels_from_row(row) if row else None
 
 
 def find_service_by_name(name: str) -> dict | None:
@@ -195,7 +391,7 @@ def find_service_by_name(name: str) -> dict | None:
         "SELECT * FROM services WHERE name=? ORDER BY created_at DESC LIMIT 1", (name,)
     ).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _labels_from_row(row) if row else None
 
 
 def list_service_rows(status: str | None = None) -> list[dict]:
@@ -207,17 +403,11 @@ def list_service_rows(status: str | None = None) -> list[dict]:
     else:
         rows = conn.execute("SELECT * FROM services ORDER BY created_at").fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_labels_from_row(r) for r in rows]
 
 
 def update_service_status(service_id: str, status: str) -> None:
-    conn = connect()
-    with conn:
-        conn.execute(
-            "UPDATE services SET status=?, updated_at=? WHERE service_id=?",
-            (status, _now(), service_id),
-        )
-    conn.close()
+    update_service(service_id, status=status)
 
 
 def delete_service_row(service_id: str) -> None:
@@ -236,6 +426,64 @@ def list_port_rows() -> list[dict]:
     rows = conn.execute("SELECT * FROM ports ORDER BY external_port").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ─────────────────────────── events（操作审计） ───────────────────────────
+
+
+def record_event(
+    action: str,
+    target: str | None = None,
+    *,
+    actor: str | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    status: int | None = None,
+    detail: dict | None = None,
+) -> None:
+    """写一条操作审计。"""
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO events (ts, actor, action, target, method, path, status, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _now(),
+                actor or "anonymous",
+                action,
+                target,
+                method,
+                path,
+                status,
+                _dump_json(detail),
+            ),
+        )
+    conn.close()
+
+
+def list_events(limit: int = 100, action: str | None = None, target: str | None = None) -> list[dict]:
+    conn = connect()
+    sql = "SELECT * FROM events"
+    where: list[str] = []
+    args: list = []
+    if action:
+        where.append("action=?")
+        args.append(action)
+    if target:
+        where.append("target=?")
+        args.append(target)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    rows = conn.execute(sql, tuple(args)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["detail"] = _load_json(d.get("detail"), None)
+        out.append(d)
+    return out
 
 
 if __name__ == "__main__":

@@ -22,7 +22,10 @@
 #   BERTH_VM_DIR=~/berth    VM 内代码目录
 #   BERTH_PORT=9000         daemon 端口
 #   BERTH_SERVICE=berth     systemd 单元名
-#   BERTH_IMAGES=all|base   沙箱镜像范围（all = base+redis+mysql）
+#   BERTH_IMAGES=all|base|full  沙箱镜像范围
+#                                  all  = base+redis+mysql+postgres
+#                                  full = all + runner（pytest/Playwright，较慢）
+#   BERTH_TOKEN=<token>     API token（VM 内 daemon 会启用鉴权；不设 = 不鉴权）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +36,7 @@ VDIR="${BERTH_VM_DIR:-~/berth}"
 PORT="${BERTH_PORT:-9000}"
 SVC="${BERTH_SERVICE:-berth}"
 IMAGES="${BERTH_IMAGES:-all}"
+TOKEN="${BERTH_TOKEN:-}"
 
 ACTION=bootstrap
 while [[ $# -gt 0 ]]; do
@@ -163,7 +167,13 @@ provision_images() {
   lima_run '
 set -e
 VDIR="${VDIR/#\~/$HOME}"
-if [ "$IMAGES" = all ]; then FLAGS="--with-redis --with-mysql"; else FLAGS=""; fi
+if [ "$IMAGES" = full ]; then
+  FLAGS="--with-redis --with-mysql --with-postgres --with-runner"
+elif [ "$IMAGES" = all ]; then
+  FLAGS="--with-redis --with-mysql --with-postgres"
+else
+  FLAGS=""
+fi
 sudo "$VDIR/scripts/setup_rootfs.sh" $FLAGS
 '
 }
@@ -183,6 +193,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=$VDIR
 ExecStart=$VDIR/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port $PORT
+Environment=BERTH_TOKEN=$TOKEN
 Restart=on-failure
 RestartSec=2
 
@@ -259,7 +270,7 @@ do_status() {
   say "systemd 服务"
   lima_run 'systemctl --no-pager status "$SVC" 2>&1 | head -12' || true
   say "API"
-  lima_run 'curl -s "http://localhost:$PORT/health"; echo; curl -s "http://localhost:$PORT/services"' || true
+  lima_run 'curl -s "http://localhost:$PORT/health"; echo; curl -s ${TOKEN:+-H "Authorization: Bearer $TOKEN"} "http://localhost:$PORT/services"' || true
   echo
 }
 

@@ -38,12 +38,25 @@ def sudo(*args, check: bool = True) -> subprocess.CompletedProcess:
     """
     cmd = [str(a) for a in args]
     argv = cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
-    res = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        res = subprocess.run(argv, capture_output=True, text=True)
+    except OSError as e:
+        # 比如宿主没装 sudo（最小系统）
+        res = subprocess.CompletedProcess(argv, 127, "", str(e))
     if check and res.returncode != 0:
         raise RuntimeError(
             f"{' '.join(argv)} failed: rc={res.returncode}\n{res.stderr}"
         )
     return res
+
+
+def priv_cmd(*args) -> list[str]:
+    """需要 root 权限的命令行（已经是 root 就直接跑，否则加 `sudo -n`）。
+
+    用于 systemctl / journalctl 这类必须以 root 执行的命令。
+    """
+    cmd = [str(a) for a in args]
+    return cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
 
 
 def ensure_base_dir() -> None:

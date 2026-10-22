@@ -10,11 +10,14 @@ import json
 import re
 import subprocess
 
-from sandbox.paths import sudo
+from sandbox.paths import priv_cmd, sudo
 
 
 def unit_active(unit: str) -> bool:
-    res = subprocess.run(["systemctl", "is-active", "--quiet", unit], capture_output=True)
+    try:
+        res = subprocess.run(["systemctl", "is-active", "--quiet", unit], capture_output=True)
+    except OSError:
+        return False  # 宿主没有 systemd
     return res.returncode == 0
 
 
@@ -58,24 +61,24 @@ def stop_unit(unit: str, graceful_timeout: float = 10, force: bool = True) -> No
     """有界停止一个 unit：先给优雅 stop 的机会，卡住就强杀。"""
     try:
         subprocess.run(
-            ["sudo", "-n", "systemctl", "stop", unit],
+            priv_cmd("systemctl", "stop", unit),
             capture_output=True,
             text=True,
             timeout=graceful_timeout,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
         pass
 
     if force and unit_active(unit):
         kill_unit(unit)
         try:
             subprocess.run(
-                ["sudo", "-n", "systemctl", "stop", unit],
+                priv_cmd("systemctl", "stop", unit),
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     sudo("systemctl", "reset-failed", unit, check=False)

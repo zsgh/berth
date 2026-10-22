@@ -28,7 +28,7 @@ scripts/macos-bootstrap.sh
 1. 检查 `limactl`（没有就提示 `/brew install lima`）
 2. 创建（或复用）名为 **`lima`** 的 VM：4 CPU / 8 GiB 内存 / 40 GiB 磁盘
    （**只操作该名字的实例**，不会碰 `default`、`colima` 等其他 VM）
-3. VM 内：装依赖 → `git clone` 代码到 `~/berth` → 建 venv → 构建沙箱镜像（base+redis+mysql）
+3. VM 内：装依赖 → `git clone` 代码到 `~/berth` → 建 venv → 构建沙箱镜像（base+redis+mysql+postgres）
 4. 写入并启动 `berth.service`（**systemd 托管，随 VM 开机自启**）
 5. 健康检查 + 打印 Mac 上的访问地址
 
@@ -41,6 +41,12 @@ curl -X POST http://localhost:9000/services \
 redis-cli -h localhost -p 16379 ping     # 服务端口也自动转发
 ```
 
+管理界面也在 Mac 上：<http://localhost:9000/ui/>
+
+> **鉴权**：VM 里的 daemon 监听 `0.0.0.0`（端口转发需要），默认**不鉴权**。
+> 想开鉴权：`BERTH_TOKEN=<长随机串> scripts/macos-bootstrap.sh`（幂等重跑即可），
+> 之后调用要带 `-H "Authorization: Bearer <token>"`，UI 登录框也填同一个 token。
+
 ### 日常管理
 
 | 操作 | 命令 |
@@ -52,7 +58,8 @@ redis-cli -h localhost -p 16379 ping     # 服务端口也自动转发
 | 删掉重建 | `scripts/macos-bootstrap.sh --recreate` |
 | 彻底删除 VM | `scripts/macos-bootstrap.sh --destroy` |
 
-可用环境变量：`BERTH_VM`（实例名）/ `BERTH_PORT` / `BERTH_SERVICE` / `BERTH_VM_DIR` / `BERTH_REPO` / `BERTH_IMAGES=all|base`。
+可用环境变量：`BERTH_VM`（实例名）/ `BERTH_PORT` / `BERTH_SERVICE` / `BERTH_VM_DIR` / `BERTH_REPO` /
+`BERTH_IMAGES=all|base|full`（`all` = base+redis+mysql+postgres，`full` 再加 runner）/ `BERTH_TOKEN`。
 
 ---
 

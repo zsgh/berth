@@ -1,0 +1,91 @@
+# 长驻服务模板：PostgreSQL
+# 镜像构建：sudo scripts/setup_rootfs.sh --with-postgres（镜像名 postgres）
+#
+# 版本：Debian bookworm 固定到 PostgreSQL 15（LTS，官方支持到 2027-11）。
+#      要换版本：改 setup_rootfs.sh 里的 PG_VERSION + 重装镜像。
+#
+# ⚠️ args 里会做 {port} 之类的占位符替换（只替换已知占位符），
+#    脚本中请避免使用花括号（不要写 ${VAR}，用 $VAR）。
+name: postgres
+image: postgres                             # 镜像名（images.yaml / 自动发现 rootfs-*）
+command: ["/bin/bash", "-c"]
+args:
+  - |
+    set -e
+    PGBIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | head -1)
+    if [ -z "$PGBIN" ]; then echo "[berth] 找不到 PostgreSQL 的 bin 目录" >&2; exit 1; fi
+    PGDATA=/var/lib/postgresql/data
+    export PGDATA
+    export PGPASSWORD="$POSTGRES_PASSWORD"
+
+    if [ ! -s "$PGDATA/PG_VERSION" ]; then
+      echo "[berth] 首次启动：initdb $PGDATA"
+      rm -rf "$PGDATA"
+      mkdir -p "$PGDATA"
+      chmod 700 "$PGDATA"
+      printf '%s' "$POSTGRES_PASSWORD" > /tmp/pgpw
+      chmod 600 /tmp/pgpw
+      "$PGBIN/initdb" -D "$PGDATA" --username=postgres --pwfile=/tmp/pgpw \
+        --auth-local=trust --auth-host=md5 --encoding=UTF8
+      rm -f /tmp/pgpw
+    fi
+
+    echo "[berth] 启动 PostgreSQL（端口 {port}，库 $POSTGRES_DB）"
+    "$PGBIN/postgres" -D "$PGDATA" -p {port} -c listen_addresses=0.0.0.0 &
+    PGPID=$!
+
+    # 等服务起来，然后建初始库（幂等）
+    for i in $(seq 1 60); do
+      if "$PGBIN/pg_isready" -h 127.0.0.1 -p {port} -q 2>/dev/null; then break; fi
+      sleep 1
+    done
+    if [ -n "$POSTGRES_DB" ] && [ "$POSTGRES_DB" != "postgres" ]; then
+      if ! "$PGBIN/psql" -h 127.0.0.1 -p {port} -U postgres -d postgres -tAc \
+            "SELECT 1 FROM pg_database WHERE datname='$POSTGRES_DB'" | grep -q 1; then
+        echo "[berth] 创建初始库 $POSTGRES_DB"
+        "$PGBIN/createdb" -h 127.0.0.1 -p {port} -U postgres "$POSTGRES_DB"
+      fi
+    fi
+
+    wait $PGPID
+env:
+  # 密码 / 初始库名都可以用 overrides 覆盖（同模板起多个服务互不影响）
+  POSTGRES_PASSWORD: "sandbox"
+  POSTGRES_DB: "sandbox"
+  PGDATA: "/var/lib/postgresql/data"
+ports:
+  - internal: 5432
+    external_range: [15432, 15532]
+volumes:
+  - internal: /var/lib/postgresql/data
+    persist: true
+healthcheck:
+  type: tcp
+  port: 5432
+  timeout: 90            # 首次启动要 initdb，时间给足
+  interval: 0.5
+resources:
+  memory_mb: 512
+  cpu_percent: 100
+# 初始化怎么执行（B5）：
+#   请求里给 init.sql（写进 workspace 的 .berth-init.sql）或 init.file
+#   → 用 psql -f 执行；{init_file} 是那个文件在沙箱里的路径
+init:
+  image: postgres
+  command: ["/bin/bash", "-c"]
+  args:
+    - |
+      set -e
+      export PGPASSWORD="{POSTGRES_PASSWORD}"
+      PSQL="/usr/bin/psql -h 127.0.0.1 -p {port} -U postgres"
+      # 等初始库出现（服务启动脚本在后台建，可能稍晚）
+      for i in $(seq 1 60); do
+        if $PSQL -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='{POSTGRES_DB}'" 2>/dev/null | grep -q 1; then
+          break
+        fi
+        sleep 1
+      done
+      exec $PSQL -d "{POSTGRES_DB}" -f "{init_file}"
+  env:
+    PGPASSWORD: "{POSTGRES_PASSWORD}"
+  timeout: 60

@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>berth 管理界面</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./style.css">
+  <!-- app.js 必须先于 alpine 加载：Alpine 在脚本执行后的微任务里就 start()，
+       组件要在 alpine:init 之前注册好 -->
+  <script defer src="./app.js"></script>
+  <script defer src="./vendor/alpine.min.js"></script>
+</head>
+<body x-data="shell" x-init="boot()">
+
+<!-- ───────────────────────── 登录 ───────────────────────── -->
+<div class="login-wrap" x-show="!loggedIn" x-cloak>
+  <form class="card login" @submit.prevent="login($event)">
+    <h1>berth</h1>
+    <p class="muted">需要 API token（环境变量 <code>BERTH_TOKEN</code>）。</p>
+    <input type="password" name="token" x-model="tokenInput" placeholder="Bearer token" autocomplete="off" autofocus>
+    <button type="submit" class="primary" :disabled="busy">进入</button>
+    <p class="error" x-show="loginError" x-text="loginError"></p>
+    <p class="muted small">token 只存在当前标签页的 sessionStorage 里，不进 URL、不进日志。</p>
+  </form>
+</div>
+
+<!-- ───────────────────────── 主界面 ───────────────────────── -->
+<div class="app" x-show="loggedIn" x-cloak>
+  <aside class="sidebar">
+    <div class="brand">berth <span class="muted small" x-text="info?.version || ''"></span></div>
+    <nav>
+      <a href="#/" :class="{active: route.section === 'overview'}">总览</a>
+      <a href="#/services" :class="{active: route.section === 'services'}">服务</a>
+      <a href="#/runs" :class="{active: route.section === 'runs'}">执行</a>
+      <a href="#/run/new" :class="{active: route.section === 'run'}">手动运行</a>
+      <a href="#/volumes" :class="{active: route.section === 'volumes'}">数据卷</a>
+      <a href="#/images" :class="{active: route.section === 'images'}">镜像</a>
+      <a href="#/templates" :class="{active: route.section === 'templates'}">模板</a>
+      <a href="#/events" :class="{active: route.section === 'events'}">操作记录</a>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="ghost" @click="logout()">退出</button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="status-dot" :class="healthClass"></div>
+      <span x-text="healthText"></span>
+      <div class="spacer"></div>
+      <span class="muted small" x-show="route.name==='services' && serviceCount" x-text="serviceCount + ' 个活跃服务'"></span>
+      <span class="muted small" x-show="route.name==='runs' && runCount" x-text="runCount + ' 条执行记录'"></span>
+    </header>
+
+    <div class="content">
+      <!-- 提示条 -->
+      <div class="toast" x-show="toast" :class="toastKind" x-text="toast"></div>
+
+      <!-- ── 总览 ── -->
+      <section x-show="route.name === 'overview'">
+        <h2>总览</h2>
+        <div class="grid stats" x-show="stats">
+          <div class="card stat">
+            <div class="label">宿主 CPU</div>
+            <div class="value" x-text="stats?.cpu?.percent != null ? stats.cpu.percent + '%' : '—'"></div>
+            <div class="muted small" x-text="stats?.cpu?.cores ? stats.cpu.cores + ' 核' : ''"></div>
+          </div>
+          <div class="card stat">
+            <div class="label">内存</div>
+            <div class="value" x-text="human(stats?.memory?.used_bytes)"></div>
+            <div class="muted small" x-text="'共 ' + human(stats?.memory?.total_bytes)"></div>
+          </div>
+          <div class="card stat">
+            <div class="label">磁盘（BERTH_HOME）</div>
+            <div class="value" x-text="stats?.disk?.percent != null ? stats.disk.percent + '%' : '—'"></div>
+            <div class="muted small" x-text="human(stats?.disk?.used_bytes) + ' / ' + human(stats?.disk?.total_bytes)"></div>
+          </div>
+          <div class="card stat">
+            <div class="label">活跃服务</div>
+            <div class="value" x-text="stats?.services?.active ?? '—'"></div>
+            <div class="muted small" x-text="'共 ' + (stats?.services?.total ?? 0) + ' 条记录'"></div>
+          </div>
+          <div class="card stat">
+            <div class="label">近 24h 执行</div>
+            <div class="value" x-text="stats?.runs?.last_24h ?? '—'"></div>
+            <div class="muted small" x-text="'失败 ' + (stats?.runs?.failed_24h ?? 0) + ' 次'"></div>
+          </div>
+          <div class="card stat">
+            <div class="label">孤儿卷</div>
+            <div class="value" x-text="stats?.volumes?.orphan ?? '—'"></div>
+            <div class="muted small" x-text="'共 ' + (stats?.volumes?.total ?? 0) + ' 个卷'"></div>
+          </div>
+        </div>
+        <div class="card" x-show="stats?.alerts?.length">
+          <h3>告警</h3>
+          <ul><template x-for="a in (stats?.alerts || [])" :key="a"><li class="warn" x-text="a"></li></template></ul>
+        </div>
+        <div class="card">
+          <h3>运行配置</h3>
+          <table class="kv">
+            <tr><th>版本</th><td x-text="info?.version"></td></tr>
+            <tr><th>监听</th><td x-text="'127.0.0.1:9000（对外监听需显式配置 BERTH_HOST）'"></td></tr>
+            <tr><th>鉴权</th><td x-text="info?.auth?.enabled ? 'Bearer token 已启用' : '未配置 token（不鉴权）'"></td></tr>
+            <tr><th>超时上限</th><td x-text="info?.limits?.timeout_seconds + ' 秒'"></td></tr>
+            <tr><th>内存上限</th><td x-text="info?.limits?.memory_mb + ' MB'"></td></tr>
+            <tr><th>CPU 上限</th><td x-text="info?.limits?.cpu_percent + '%'"></td></tr>
+            <tr><th>进程数上限</th><td x-text="info?.limits?.processes"></td></tr>
+            <tr><th>挂载白名单</th><td x-text="(info?.mount_roots || []).join(', ') || '（无）'"></td></tr>
+            <tr><th>网络策略</th><td x-text="(info?.network?.modes || []).join(' / ') + '（' + (info?.network?.mechanism || '') + '）'"></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── 服务列表 ── -->
+      <section x-show="route.name === 'services'">
+        <div class="head-row">
+          <h2>服务</h2>
+          <div class="spacer"></div>
+          <label class="inline"><input type="checkbox" name="showAll" x-model="services.showAll"> 含历史</label>
+          <input class="search" name="serviceLabel" placeholder="按标签过滤，如 project=foo" x-model="services.labelFilter"
+                 @keyup.enter="services.load()">
+          <button class="ghost" @click="services.load()">刷新</button>
+          <button class="primary" @click="services.createOpen = true">新建服务</button>
+        </div>
+
+        <div class="card" x-show="services.createOpen">
+          <h3>新建 / 确保服务</h3>
+          <div class="form-grid">
+            <label>名字<input name="serviceName" x-model="services.form.name" placeholder="my-app-db"></label>
+            <label>模板
+              <select name="serviceTemplate" x-model="services.form.template">
+                <template x-for="t in (info?.templates || [])" :key="t"><option :value="t" x-text="t"></option></template>
+              </select>
+            </label>
+            <label>标签（k=v, 逗号分隔）<input name="serviceLabels" x-model="services.form.labels" placeholder="project=foo,run=1"></label>
+          </div>
+          <div class="form-grid">
+            <label>env 覆盖（JSON）<textarea name="serviceEnv" x-model="services.form.env" rows="3" placeholder='{"POSTGRES_PASSWORD":"x"}'></textarea></label>
+            <label>初始化 SQL / 脚本<textarea name="serviceInit" x-model="services.form.initSql" rows="3" placeholder="CREATE TABLE ..."></textarea></label>
+          </div>
+          <div class="actions">
+            <button class="primary" @click="services.create()">创建</button>
+            <button class="ghost" @click="services.createOpen = false">取消</button>
+          </div>
+        </div>
+
+        <table class="table" x-show="services.rows.length">
+          <thead><tr>
+            <th>名字</th><th>模板</th><th>状态</th><th>地址</th><th>内存</th><th>CPU</th><th>磁盘</th>
+            <th>标签</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="s in services.rows" :key="s.service_id">
+              <tr>
+                <td><a :href="'#/services/' + encodeURIComponent(s.name || s.service_id)" x-text="s.name || s.service_id"></a></td>
+                <td x-text="s.template"></td>
+                <td><span class="badge" :class="s.status" x-text="s.status"></span></td>
+                <td class="mono" x-text="s.host + ':' + s.port"></td>
+                <td x-text="s['usage-h']?.memory || '—'"></td>
+                <td x-text="s['usage-h']?.cpu_time || '—'"></td>
+                <td x-text="s['usage-h']?.disk || '—'"></td>
+                <td class="small"><template x-for="(v,k) in (s.labels||{})" :key="k"><span class="tag" x-text="k + '=' + v"></span></template></td>
+                <td class="row-actions">
+                  <button class="ghost sm" @click="services.act(s,'stop')">停</button>
+                  <button class="ghost sm" @click="services.act(s,'start')">起</button>
+                  <button class="ghost sm" @click="services.confirmReset(s)">重置</button>
+                  <button class="ghost sm" @click="services.act(s,'delete')">删</button>
+                  <button class="ghost sm" @click="services.act(s,'delete','volumes=true')">删+卷</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!services.rows.length">没有服务。先在上面「新建服务」。</div>
+      </section>
+
+      <!-- ── 服务详情 ── -->
+      <section x-show="route.name === 'servicedetail'">
+        <div class="head-row">
+          <h2>服务详情</h2>
+          <div class="spacer"></div>
+          <a class="ghost btn" href="#/services">← 返回列表</a>
+        </div>
+        <div class="card" x-show="service.detail">
+          <table class="kv">
+            <tr><th>名字</th><td x-text="service.detail?.name"></td></tr>
+            <tr><th>service_id</th><td class="mono" x-text="service.detail?.service_id"></td></tr>
+            <tr><th>模板</th><td x-text="service.detail?.template"></td></tr>
+            <tr><th>状态</th><td><span class="badge" :class="service.detail?.status" x-text="service.detail?.status"></span></td></tr>
+            <tr><th>地址</th><td class="mono" x-text="service.detail?.host + ':' + service.detail?.port"></td></tr>
+            <tr><th>systemd unit</th><td class="mono" x-text="service.detail?.unit"></td></tr>
+            <tr><th>目录</th><td class="mono small" x-text="service.detail?.dir"></td></tr>
+            <tr><th>网络策略</th><td class="mono small" x-text="JSON.stringify(service.detail?.network || {})"></td></tr>
+            <tr><th>标签</th><td x-text="JSON.stringify(service.detail?.labels || {})"></td></tr>
+            <tr><th>用量</th><td x-text="JSON.stringify(service.detail?.['usage-h'] || {})"></td></tr>
+          </table>
+        </div>
+        <div class="card">
+          <h3>生效的模板（含覆盖项）</h3>
+          <pre class="code" x-text="JSON.stringify(service.detail?.spec || {}, null, 2)"></pre>
+        </div>
+        <div class="card" x-show="service.detail?.init_result && Object.keys(service.detail.init_result).length">
+          <h3>初始化结果</h3>
+          <pre class="code" x-text="JSON.stringify(service.detail?.init_result, null, 2)"></pre>
+        </div>
+        <div class="card">
+          <div class="head-row"><h3>日志</h3><div class="spacer"></div>
+            <label class="inline">tail <input type="number" name="logTail" x-model.number="service.tail" min="10" max="2000" style="width:90px"></label>
+            <button class="ghost" @click="service.loadLogs()">刷新</button>
+            <button class="ghost" @click="service.toggleFollow()" x-text="service.follow ? '停止跟随' : '实时跟随'"></button>
+          </div>
+          <pre class="log" x-ref="log" x-text="service.clip(service.logText)"></pre>
+        </div>
+      </section>
+
+      <!-- ── 执行列表 ── -->
+      <section x-show="route.name === 'runs'">
+        <div class="head-row">
+          <h2>执行</h2>
+          <div class="spacer"></div>
+          <select name="runStatus" x-model="runs.filter.status" @change="runs.load()">
+            <option value="">全部状态</option>
+            <option value="running">running</option>
+            <option value="finished">finished</option>
+            <option value="timeout">timeout</option>
+            <option value="killed">killed</option>
+            <option value="error">error</option>
+          </select>
+          <select name="runImage" x-model="runs.filter.image" @change="runs.load()">
+            <option value="">全部镜像</option>
+            <template x-for="i in Object.keys(info?.images || {})" :key="i"><option :value="i" x-text="i"></option></template>
+          </select>
+          <input class="search" name="runLabel" placeholder="标签，如 project=foo" x-model="runs.filter.label" @keyup.enter="runs.load()">
+          <button class="ghost" @click="runs.load()">刷新</button>
+        </div>
+        <table class="table" x-show="runs.rows.length">
+          <thead><tr>
+            <th>task_id</th><th>状态</th><th>镜像</th><th>耗时</th><th>exit</th>
+            <th>网络</th><th>标签</th><th>时间</th>
+          </tr></thead>
+          <tbody>
+            <template x-for="r in runs.rows" :key="r.task_id">
+              <tr>
+                <td><a :href="'#/runs/' + encodeURIComponent(r.task_id)" class="mono" x-text="r.task_id"></a></td>
+                <td><span class="badge" :class="r.status" x-text="r.status"></span></td>
+                <td x-text="r.image"></td>
+                <td x-text="r.duration_ms != null ? (r.duration_ms/1000).toFixed(2) + 's' : '—'"></td>
+                <td x-text="r.exit_code"></td>
+                <td x-text="r.network?.mode || 'host'"></td>
+                <td class="small"><template x-for="(v,k) in (r.labels||{})" :key="k"><span class="tag" x-text="k + '=' + v"></span></template></td>
+                <td class="small mono" x-text="r.created_at"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!runs.rows.length">还没有执行记录。</div>
+      </section>
+
+      <!-- ── 执行详情 ── -->
+      <section x-show="route.name === 'rundetail'">
+        <div class="head-row">
+          <h2>执行详情</h2>
+          <div class="spacer"></div>
+          <button class="ghost" x-show="run.detail?.status === 'running'" @click="run.cancel()">取消</button>
+          <button class="ghost" @click="run.load()">刷新</button>
+          <a class="ghost btn" href="#/runs">← 返回列表</a>
+        </div>
+        <div class="card" x-show="run.detail">
+          <table class="kv">
+            <tr><th>task_id</th><td class="mono" x-text="run.detail?.task_id"></td></tr>
+            <tr><th>状态</th><td><span class="badge" :class="run.detail?.status" x-text="run.detail?.status"></span></td></tr>
+            <tr><th>镜像</th><td x-text="run.detail?.image"></td></tr>
+            <tr><th>exit_code</th><td x-text="run.detail?.exit_code"></td></tr>
+            <tr><th>耗时</th><td x-text="run.detail?.duration_ms != null ? (run.detail.duration_ms/1000).toFixed(2) + 's' : '—'"></td></tr>
+            <tr><th>网络策略</th><td class="mono small" x-text="JSON.stringify(run.detail?.network || {})"></td></tr>
+            <tr><th>标签</th><td x-text="JSON.stringify(run.detail?.labels || {})"></td></tr>
+          </table>
+        </div>
+        <div class="card">
+          <div class="head-row"><h3>输出</h3><div class="spacer"></div>
+            <span class="muted small" x-text="'stdout ' + run.stdout.length + ' 字节'"></span>
+          </div>
+          <pre class="log" x-text="run.clip(run.stdout + (run.stderr ? '\n--- stderr ---\n' + run.stderr : ''))"></pre>
+        </div>
+        <div class="card">
+          <div class="head-row"><h3>产物</h3><div class="spacer"></div>
+            <button class="ghost" @click="run.downloadAll()">打包下载</button>
+            <button class="ghost" @click="run.clearWorkspace()">清空 workspace</button>
+          </div>
+          <table class="table" x-show="run.files.length">
+            <thead><tr><th>文件</th><th>大小</th><th>类型</th><th>操作</th></tr></thead>
+            <tbody>
+              <template x-for="f in run.files" :key="f.path">
+                <tr>
+                  <td class="mono small" x-text="f.path"></td>
+                  <td x-text="human(f.size)"></td>
+                  <td class="small" x-text="f.mime"></td>
+                  <td class="row-actions">
+                    <button class="ghost sm" @click="run.preview(f)">预览</button>
+                    <button class="ghost sm" @click="run.download(f)">下载</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="card muted" x-show="!run.files.length">没有产物文件。</div>
+          <div class="preview" x-show="run.previewFile">
+            <div class="head-row">
+              <h3 x-text="run.previewFile?.path"></h3><div class="spacer"></div>
+              <button class="ghost" @click="run.previewFile = null">关闭</button>
+            </div>
+            <!-- 图片 / 文本：转义后渲染 -->
+            <template x-if="run.previewKind === 'image'">
+              <img :src="run.previewUrl" alt="产物预览" class="preview-img">
+            </template>
+            <template x-if="run.previewKind === 'text'">
+              <pre class="code" x-text="run.previewText"></pre>
+            </template>
+            <!-- HTML 报告：只放在 sandbox iframe 里（不给 allow-same-origin） -->
+            <template x-if="run.previewKind === 'html'">
+              <iframe class="preview-frame" sandbox="" :src="run.previewUrl"></iframe>
+            </template>
+            <template x-if="run.previewKind === 'other'">
+              <p class="muted">这种类型不支持预览，请下载后查看。</p>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 手动运行 ── -->
+      <section x-show="route.name === 'runnew'">
+        <h2>手动运行</h2>
+        <div class="card">
+          <div class="form-grid">
+            <label>镜像
+              <select name="runImage" x-model="newRun.image">
+                <template x-for="i in Object.keys(info?.images || {})" :key="i"><option :value="i" x-text="i"></option></template>
+              </select>
+            </label>
+            <label>语言
+              <select name="runLanguage" x-model="newRun.language">
+                <option value="">自动（shebang / python）</option>
+                <option value="python">python</option>
+                <option value="bash">bash</option>
+                <option value="sh">sh</option>
+              </select>
+            </label>
+            <label>超时（秒）<input type="number" name="runTimeout" x-model.number="newRun.timeout" min="1"></label>
+            <label>内存（MB）<input type="number" name="runMemory" x-model.number="newRun.memory_mb" min="16"></label>
+            <label>CPU（%）<input type="number" name="runCpu" x-model.number="newRun.cpu_percent" min="1"></label>
+            <label>进程数<input type="number" name="runProcesses" x-model.number="newRun.processes" min="1" placeholder="用默认"></label>
+            <label>task_id（可空）<input name="runTaskId" x-model="newRun.task_id" placeholder="自动生成"></label>
+            <label>网络策略
+              <select name="runNetwork" x-model="newRun.networkMode">
+                <option value="host">host（不限制）</option>
+                <option value="none">none（断网）</option>
+                <option value="allow">allow（白名单）</option>
+              </select>
+            </label>
+            <label>白名单（逗号分隔）<input name="runAllow" x-model="newRun.networkAllow" placeholder="10.0.0.0/8,example.com"></label>
+            <label>标签（k=v, 逗号分隔）<input name="runLabels" x-model="newRun.labels" placeholder="project=foo"></label>
+            <label>只读挂载（源:目标, 逗号分隔）<input name="runMounts" x-model="newRun.mounts" placeholder="/srv/berth-mounts/app:/app"></label>
+          </div>
+          <label>代码<textarea name="runCode" x-model="newRun.code" rows="10" placeholder="print('hello')"></textarea></label>
+          <label>命令（JSON 数组，与代码二选一）<input name="runCmd" x-model="newRun.cmd" placeholder='["/bin/echo","hi"]'></label>
+          <label class="inline"><input type="checkbox" name="runAsync" x-model="newRun.isAsync"> 异步执行（不阻塞）</label>
+          <div class="actions">
+            <button class="primary" @click="newRun.submit()">提交</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 数据卷 ── -->
+      <section x-show="route.name === 'volumes'">
+        <div class="head-row"><h2>数据卷</h2><div class="spacer"></div>
+          <button class="ghost" @click="volumes.load()">刷新</button></div>
+        <table class="table" x-show="volumes.rows.length">
+          <thead><tr><th>service_id</th><th>名字</th><th>模板</th><th>状态</th><th>大小</th><th>路径</th><th>孤儿</th><th>操作</th></tr></thead>
+          <tbody>
+            <template x-for="v in volumes.rows" :key="v.service_id">
+              <tr>
+                <td class="mono small" x-text="v.service_id"></td>
+                <td x-text="v.name || '—'"></td>
+                <td x-text="v.template || '—'"></td>
+                <td x-text="v.status || '—'"></td>
+                <td x-text="human(v.bytes)"></td>
+                <td class="mono small" x-text="v.path"></td>
+                <td><span class="badge warn" x-show="v.orphan">孤儿</span></td>
+                <td><button class="ghost sm" x-show="v.orphan" @click="volumes.remove(v)">清理</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!volumes.rows.length">没有数据卷。</div>
+      </section>
+
+      <!-- ── 镜像 ── -->
+      <section x-show="route.name === 'images'">
+        <h2>镜像</h2>
+        <table class="table" x-show="images.rows.length">
+          <thead><tr><th>名字</th><th>路径</th><th>大小</th></tr></thead>
+          <tbody>
+            <template x-for="i in images.rows" :key="i.name">
+              <tr><td class="mono" x-text="i.name"></td><td class="mono small" x-text="i.path"></td><td x-text="human(i.size_bytes)"></td></tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted">
+          镜像是预构建的 rootfs 目录（overlayfs 的只读下层）。构建：
+          <code>sudo scripts/setup_rootfs.sh --with-redis --with-mysql --with-postgres --with-runner</code>
+        </div>
+      </section>
+
+      <!-- ── 模板 ── -->
+      <section x-show="route.name === 'templates'">
+        <div class="head-row"><h2>模板</h2><div class="spacer"></div>
+          <button class="ghost" @click="templates.load()">刷新</button></div>
+        <div class="grid two">
+          <template x-for="t in templates.names" :key="t">
+            <div class="card">
+              <div class="head-row"><h3 x-text="t"></h3><div class="spacer"></div>
+                <button class="ghost sm" @click="templates.show(t)">查看</button>
+                <button class="ghost sm" @click="templates.validate(t)">校验</button>
+              </div>
+              <pre class="code" x-show="templates.current === t" x-text="templates.text"></pre>
+              <p class="error" x-show="templates.error" x-text="templates.error"></p>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- ── 操作记录 ── -->
+      <section x-show="route.name === 'events'">
+        <div class="head-row"><h2>操作记录</h2><div class="spacer"></div>
+          <button class="ghost" @click="events.load()">刷新</button></div>
+        <table class="table" x-show="events.rows.length">
+          <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>状态码</th></tr></thead>
+          <tbody>
+            <template x-for="e in events.rows" :key="e.id">
+              <tr>
+                <td class="small mono" x-text="e.ts"></td>
+                <td class="small mono" x-text="e.actor"></td>
+                <td class="small" x-text="e.action"></td>
+                <td class="small mono" x-text="e.target || ''"></td>
+                <td><span class="badge" :class="e.status < 400 ? 'running' : 'crashed'" x-text="e.status"></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!events.rows.length">还没有写操作记录。</div>
+      </section>
+    </div>
+  </main>
+
+  <!-- 二次确认对话框（破坏性操作：需要输入目标名称） -->
+  <div class="modal-bg" x-show="confirm.open" x-cloak>
+    <div class="card modal">
+      <h3 x-text="confirm.title"></h3>
+      <p class="muted" x-text="confirm.message"></p>
+      <label x-show="confirm.needName">输入 <b x-text="confirm.name"></b> 以确认
+        <input name="confirmInput" x-model="confirm.input" @keyup.enter="confirm.accept()">
+      </label>
+      <p class="error" x-show="confirm.error" x-text="confirm.error"></p>
+      <div class="actions">
+        <button class="danger" @click="confirm.accept()" x-text="confirm.okText || '确认'"></button>
+        <button class="ghost" @click="confirm.cancel()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
