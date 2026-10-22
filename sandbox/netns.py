@@ -270,6 +270,15 @@ def _enable_forwarding() -> None:
     _run(["sh", "-c", "echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet"], check=False)
 
 
+def _rule_args(line: str) -> list[str]:
+    """把 `iptables -S` 的一行变成 `-D` 需要的参数。
+
+    要跳过 "-A <chain>"，并去掉引号（-S 输出里 comment 的值是带引号的）。
+    """
+    spec = line.split()
+    return [tok.strip('"') for tok in spec[2:]]
+
+
 def _chain_rules(table: str, chain: str) -> list[str]:
     res = _iptables(table, "-S", chain, check=False)
     return [line.strip() for line in res.stdout.splitlines() if line.strip()]
@@ -300,9 +309,7 @@ def _dedupe_rules() -> int:
                     comment = parts[i + 1]     # 取 comment 的**值**，不是 "--comment" 本身
             key = comment or line
             if key in seen:
-                spec = line.split()
-                args = spec[2:]        # 跳过 "-A <chain>"
-                _iptables(table, "-D", chain, *args, check=False)
+                _iptables(table, "-D", chain, *_rule_args(line), check=False)
                 removed += 1
             else:
                 seen.add(key)
@@ -374,10 +381,7 @@ def _remove_user_rules(user: str, idx: int) -> None:
             lines = [l for l in res.stdout.splitlines() if f"{_COMMENT}:{user}:" in l]
             if not lines:
                 break
-            # 反向构造 -D 参数
-            spec = lines[0].split()
-            args = spec[2:]        # 跳过 "-A <chain>"
-            _iptables(table, "-D", chain, *args, check=False)
+            _iptables(table, "-D", chain, *_rule_args(lines[0]), check=False)
 
 
 def add_service_port(user: str, port: int) -> None:
@@ -433,9 +437,7 @@ def remove_service_port(user: str, port: int) -> None:
             lines = [l for l in res.stdout.splitlines() if comment in l]
             if not lines:
                 break
-            spec = lines[0].split()
-            args = spec[2:]        # 跳过 "-A <chain>"
-            _iptables(table, "-D", chain, *args, check=False)
+            _iptables(table, "-D", chain, *_rule_args(lines[0]), check=False)
 
 
 # ─────────────────────────── 沙箱/服务怎么进 netns ───────────────────────────
