@@ -28,7 +28,9 @@ UNIT_FILE="/etc/systemd/system/${SVC}.service"
 TOKEN_FILE="${BERTH_TOKEN_FILE:-/var/lib/berth/token}"
 BERTH_HOST="${BERTH_HOST:-127.0.0.1}"
 BERTH_PORT="${BERTH_PORT:-9000}"
-RUN_USER="${BERTH_USER:-$(id -un)}"
+# 注意：sudo 下 `id -un` 是 root，要用 SUDO_USER（真正的主人）
+# —— venv 常常建在某个用户下（依赖在 ~/.local 里），用错用户会 import 到系统的老版本
+RUN_USER="${BERTH_USER:-${SUDO_USER:-$(id -un)}}"
 PY="${BERTH_PYTHON:-$REPO_DIR/.venv/bin/python}"
 
 say()  { echo; echo "── $* ──"; }
@@ -65,6 +67,14 @@ EOF
   chmod 600 "$ENV_FILE"
   chown root:root "$ENV_FILE" 2>/dev/null || true
   info "$ENV_FILE（600 root:root）"
+
+  say "1b/5 自检：$RUN_USER 能不能用这个 Python 跑起来"
+  if ! su -s /bin/bash "$RUN_USER" -c "$PY -c 'import fastapi, uvicorn, pydantic; assert pydantic.VERSION.startswith(\"2\"), pydantic.VERSION'" 2>/dev/null; then
+    die "$RUN_USER 用不了 $PY（依赖装在别处了？比如 venv 是 --system-site-packages 建的，依赖在 ~/.local）。
+       换用户：BERTH_USER=<用户> sudo $0 setup
+       或先修 venv：sudo -u $RUN_USER $PY -m pip install -r requirements.txt"
+  fi
+  info "OK"
 
   say "2/5 写 systemd 单元（开机自启 + 崩了自动拉起）"
   cat > "$UNIT_FILE" <<EOF
