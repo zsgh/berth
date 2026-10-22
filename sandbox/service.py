@@ -26,14 +26,13 @@ import yaml
 from sandbox.images import resolve_image
 from sandbox.mounts import normalize_mounts
 from sandbox.network import allocate_port, normalize_policy, release_port
-from sandbox.overlayfs import SETPRIV, exec_command, sandbox_shell, systemd_run_cmd
+from sandbox.overlayfs import exec_command, sandbox_shell, setpriv_cmd, systemd_run_cmd
 from sandbox.paths import (
     BASE_DIR,
-    SANDBOX_GID,
-    SANDBOX_UID,
     dir_size,
     ensure_base_dir,
     priv_cmd,
+    sandbox_ids,
     sudo,
 )
 from sandbox.systemd_units import kill_unit, list_managed_units, stop_unit, unit_active
@@ -580,8 +579,9 @@ def _start_service_impl(
         for m in normalize_mounts(tpl.get("mounts") or []):
             binds_ro[m["target"]] = Path(m["source"])
 
-        # overlay/数据卷归沙箱 uid，服务进程（uid 1000）才能写
-        sudo("chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", upper, *binds.values())
+        # overlay/数据卷归该 user 的 uid，服务进程才能写（别的 user 读不到）
+        uid, gid = sandbox_ids(owner)
+        sudo("chown", "-R", f"{uid}:{gid}", upper, *binds.values())
 
         # 4. 组装命令（{port} 等占位符替换）
         fmt = {
@@ -603,7 +603,11 @@ def _start_service_impl(
             binds_ro=binds_ro,
             env=env,
             # 同 run_script：bash 作为 pid ns init，捕获退出码（长驻进程退出码进 journal）
-            entry="set +e\n" + f"{SETPRIV} {shlex.join(cmdline)}\n" + "rc=$?\nexit $rc",
+            entry=(
+                "set +e\n"
+                + f"{setpriv_cmd(*sandbox_ids(owner))} {shlex.join(cmdline)}\n"
+                + "rc=$?\nexit $rc"
+            ),
         )
 
         network = normalize_policy(tpl.get("network"))
@@ -676,6 +680,7 @@ def _start_service_impl(
                 name=name or service_id,
                 svc_dir=svc_dir,
                 task_id=task_id,
+                owner=owner,
             )
             update_service(service_id, init_result=json.dumps(result, ensure_ascii=False))
             if result.get("exit_code") not in (0, None):
@@ -738,6 +743,7 @@ def run_service_init(
     name: str,
     svc_dir: Path,
     task_id: str | None = None,
+    owner: str | None = None,
 ) -> dict:
     """执行服务的初始化内容（SQL / 脚本 / workspace 文件）。
 
@@ -826,6 +832,7 @@ def run_service_init(
         timeout=timeout,
         memory_mb=512,
         cpu_percent=100,
+        owner=owner,
     )
     result["command"] = argv
     result["image"] = image

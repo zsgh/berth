@@ -30,16 +30,29 @@ from pathlib import Path
 from sandbox.images import resolve_image
 from sandbox.mounts import normalize_mounts
 from sandbox.network import normalize_policy, systemd_network_properties
-from sandbox.paths import BASE_DIR, ROOTFS, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, priv_cmd, sudo
+from sandbox.paths import (
+    BASE_DIR,
+    ROOTFS,
+    ensure_base_dir,
+    priv_cmd,
+    sandbox_ids,
+    sudo,
+)
 from sandbox.systemd_units import kill_unit, stop_unit
 from sandbox.tracing import span
 
 MAX_OUTPUT = 10_000
 
 # 沙箱内最终降权执行的入口（python3 在 rootfs 里的路径）
-SETPRIV = "setpriv --reuid={uid} --regid={gid} --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all".format(
-    uid=SANDBOX_UID, gid=SANDBOX_GID
+# uid/gid 按 user 分配（M3 的 uid 池）；没有 user 时用固定的 1000
+SETPRIV = (
+    "setpriv --reuid={uid} --regid={gid} --clear-groups "
+    "--bounding-set=-all --inh-caps=-all --ambient-caps=-all"
 )
+
+
+def setpriv_cmd(uid: int, gid: int) -> str:
+    return SETPRIV.format(uid=uid, gid=gid)
 
 # /dev/shm 大小（Chromium / Playwright 需要，默认 1G 上限，不预占内存）
 DEFAULT_SHM_SIZE = "1g"
@@ -310,8 +323,18 @@ def prepare_run(
     if script_name:
         (upper / "sandbox" / script_name).write_text(code, encoding="utf-8")
 
-    # upper / workspace 归 uid 1000，沙箱内才能写
-    sudo("chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", upper, workspace)
+    # seccomp 过滤器（M3）：装在 payload 进程上（沙箱构造本身要 mount，不能一起拦）
+    from sandbox import seccomp as seccomp_mod
+
+    seccomp_mod.write_filter(upper / "sandbox")
+    payload = list(argv)
+    wrapped = seccomp_mod.wrap_command(payload)
+    if wrapped:
+        payload = wrapped
+
+    # upper / workspace 归该 user 的 uid，沙箱内才能写（别的 user 读不到）
+    uid, gid = sandbox_ids(owner)
+    sudo("chown", "-R", f"{uid}:{gid}", upper, workspace)
 
     binds = {"/workspace": workspace}
     binds_ro: dict[str, Path] = {}
@@ -330,7 +353,7 @@ def prepare_run(
         # unshare 会把 init 的信号死亡错误地报告成 rc=0。
         entry=(
             "set +e\n"
-            f"{SETPRIV} {shlex.join(argv)}\n"
+            f"{setpriv_cmd(*sandbox_ids(owner))} {shlex.join(payload)}\n"
             "rc=$?\n"
             "exit $rc"
         ),
@@ -545,6 +568,7 @@ def exec_command(
     tasks_max: int = 64,
     network: dict | None = None,
     workdir: Path | None = None,
+    owner: str | None = None,
 ) -> dict:
     """在沙箱里执行一条 argv（服务 init 用）。
 
@@ -559,7 +583,8 @@ def exec_command(
     upper, work, newroot = run_dir / "upper", run_dir / "work", run_dir / "newroot"
     for d in (upper, work, newroot):
         d.mkdir(parents=True, exist_ok=True)
-    sudo("chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", upper)
+    uid, gid = sandbox_ids(owner)
+    sudo("chown", "-R", f"{uid}:{gid}", upper)
 
     inner = sandbox_shell(
         upper=upper,
@@ -571,7 +596,7 @@ def exec_command(
         env=env,
         entry=(
             "set +e\n"
-            f"{SETPRIV} {shlex.join([str(a) for a in argv])}\n"
+            f"{setpriv_cmd(*sandbox_ids(owner))} {shlex.join([str(a) for a in argv])}\n"
             "rc=$?\n"
             "exit $rc"
         ),

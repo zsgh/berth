@@ -342,6 +342,12 @@ def scripts_list(
     return {"runs": runs, "count": len(runs), "next_cursor": next_cursor}
 
 
+def _owner_of_task(task_id: str) -> str | None:
+    """任务归属的 user（上传文件时用来定 uid）。"""
+    record = get_run(task_id)
+    return (record or {}).get("owner")
+
+
 def _run_or_404(request: Request, task_id: str) -> dict:
     """取执行记录；不在作用域内 → 404（不泄露存在性）。"""
     record = get_run(task_id)
@@ -504,15 +510,17 @@ async def scripts_upload(task_id: str, request: Request):
                         payloads.append((value.filename or key, data))
                 elif isinstance(value, str):
                     payloads.append((key, value.encode()))
-            return upload_files(task_id, files=payloads, archive=archive)
+            return upload_files(
+                task_id, files=payloads, archive=archive, owner=_owner_of_task(task_id)
+            )
 
         body = await request.body()
         if not body:
             raise HTTPException(status_code=400, detail="空请求体")
         filename = request.query_params.get("filename")
         if filename:
-            return write_file(task_id, filename, body)
-        return upload_files(task_id, archive=body)
+            return write_file(task_id, filename, body, owner=_owner_of_task(task_id))
+        return upload_files(task_id, archive=body, owner=_owner_of_task(task_id))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

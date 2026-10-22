@@ -20,7 +20,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from sandbox.paths import BASE_DIR, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, sudo
+from sandbox.paths import BASE_DIR, ensure_base_dir, sandbox_ids, sudo
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -65,13 +65,14 @@ def safe_join(root: Path, rel: str) -> Path:
     return target
 
 
-def _chown_sandbox(path: Path) -> None:
-    """让沙箱里的 uid 1000 能读（上传的文件）。失败不影响上传本身。"""
+def _chown_sandbox(path: Path, owner: str | None = None) -> None:
+    """让沙箱里的那个 uid 能读（上传的文件）。失败不影响上传本身。"""
+    uid, gid = sandbox_ids(owner)
     try:
-        os.chown(path, SANDBOX_UID, SANDBOX_GID)
+        os.chown(path, uid, gid)
     except (OSError, PermissionError):
         try:
-            sudo("chown", "-R", f"{SANDBOX_UID}:{SANDBOX_GID}", path, check=False)
+            sudo("chown", "-R", f"{uid}:{gid}", path, check=False)
         except Exception:
             pass  # 没有 root 权限就跳过（开发机 / 测试环境）
 
@@ -117,6 +118,7 @@ def upload_files(
     task_id: str,
     files: list[tuple[str, bytes]] | None = None,
     archive: bytes | None = None,
+    owner: str | None = None,
 ) -> dict:
     """上传文件到任务 workspace。
 
@@ -145,11 +147,11 @@ def upload_files(
     if archive:
         written.extend(extract_tar(archive, ws))
 
-    _chown_sandbox(ws)
+    _chown_sandbox(ws, owner)
     return {"task_id": task_id, "workspace": str(ws), "files": sorted(set(written))}
 
 
-def write_file(task_id: str, rel: str, data: bytes) -> dict:
+def write_file(task_id: str, rel: str, data: bytes, owner: str | None = None) -> dict:
     """写单个文件（上传接口的简化版）。"""
     task_id = validate_task_id(task_id)
     ws = task_workspace(task_id)
@@ -157,7 +159,7 @@ def write_file(task_id: str, rel: str, data: bytes) -> dict:
     target = safe_join(ws, rel)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
-    _chown_sandbox(target)
+    _chown_sandbox(target, owner)
     return {"task_id": task_id, "path": str(rel), "size": len(data)}
 
 

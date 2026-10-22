@@ -26,8 +26,22 @@ ROOTFS = os.environ.get("BERTH_ROOTFS", "/opt/berth/rootfs")
 BASE_DIR = Path(os.environ.get("BERTH_HOME", "/var/lib/berth"))
 
 # 沙箱内降权到的 uid/gid（宿主上的数值 uid，不需要真实用户）
+# 没有 user 归属时用这个固定值（老行为）；有 user 时按 user 分配（M3 的 uid 池）
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
+
+
+def sandbox_ids(user: str | None = None) -> tuple[int, int]:
+    """沙箱该用哪个 uid/gid。
+
+    - 没有 user 归属 → 固定 1000（老行为）
+    - 有 user 归属 → 该 user 在 uid 池里分配的 uid（每个 user 不同）
+    """
+    if not user:
+        return SANDBOX_UID, SANDBOX_GID
+    from sandbox.uids import gid_for_user, uid_for_user
+
+    return uid_for_user(user), gid_for_user(user)
 
 
 def sudo(*args, check: bool = True) -> subprocess.CompletedProcess:
