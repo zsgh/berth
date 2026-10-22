@@ -178,9 +178,13 @@ def ensure_netns(user: str, cidr: str | None = None) -> dict:
         log.info("已创建 netns: %s", ns)
     _run(["ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up"], check=False)
 
-    # 2) veth 对
+    # 2) veth 对（ns 侧要搬进 netns！）
+    if _link_exists(host_veth) and not _ns_link_exists(ns, ns_veth):
+        # 半残的（netns 重建过）：删掉重来
+        _run(["ip", "link", "del", host_veth], check=False)
     if not _link_exists(host_veth):
         _run(["ip", "link", "add", host_veth, "type", "veth", "peer", "name", ns_veth])
+        _run(["ip", "link", "set", ns_veth, "netns", ns])
     # 宿主侧
     _run(["ip", "addr", "replace", f"{gw}/24", "dev", host_veth], check=False)
     _run(["ip", "link", "set", host_veth, "up"], check=False)
@@ -230,6 +234,12 @@ def _netns_exists(ns: str) -> bool:
 
 def _link_exists(name: str) -> bool:
     res = _run(["ip", "link", "show", name], check=False)
+    return res.returncode == 0
+
+
+def _ns_link_exists(ns: str, name: str) -> bool:
+    """这个接口在 netns 里吗。"""
+    res = _run(["ip", "netns", "exec", ns, "ip", "link", "show", name], check=False)
     return res.returncode == 0
 
 
