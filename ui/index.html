@@ -245,9 +245,9 @@
               <tr>
                 <td><a :href="'#/runs/' + encodeURIComponent(r.task_id)" class="mono" x-text="r.task_id"></a></td>
                 <td><span class="badge" :class="r.status" x-text="r.status"></span></td>
-                <td x-text="r.image"></td>
+                <td x-text="r.image || '—'"></td>
                 <td x-text="r.duration_ms != null ? (r.duration_ms/1000).toFixed(2) + 's' : '—'"></td>
-                <td x-text="r.exit_code"></td>
+                <td x-text="r.exit_code === null || r.exit_code === undefined ? '—' : r.exit_code"></td>
                 <td x-text="r.network?.mode || 'host'"></td>
                 <td class="small"><template x-for="(v,k) in (r.labels||{})" :key="k"><span class="tag" x-text="k + '=' + v"></span></template></td>
                 <td class="small mono" x-text="r.created_at"></td>
