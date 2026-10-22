@@ -375,7 +375,7 @@ def _remove_user_rules(user: str, idx: int) -> None:
                 break
             # 反向构造 -D 参数
             spec = lines[0].split()
-            args = [tok for tok in spec if tok != "-A"]
+            args = spec[2:]        # 跳过 "-A <chain>"
             _iptables(table, "-D", chain, *args, check=False)
 
 
@@ -433,7 +433,7 @@ def remove_service_port(user: str, port: int) -> None:
             if not lines:
                 break
             spec = lines[0].split()
-            args = [t for t in spec if t != "-A"]
+            args = spec[2:]        # 跳过 "-A <chain>"
             _iptables(table, "-D", chain, *args, check=False)
 
 
