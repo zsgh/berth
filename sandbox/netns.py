@@ -264,13 +264,50 @@ def _write_ns_resolvconf(ns: str) -> None:
 
 
 def _enable_forwarding() -> None:
-    """打开 ip 转发（沙箱要靠它出网）。"""
+    """打开 ip 转发（沙箱要靠它出网）+ route_localnet（127.0.0.1 的 DNAT hairpin 要靠它）。"""
     _run(["sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"], check=False)
+    # 宿主本地访问 127.0.0.1:port 被 DNAT 到网段地址时，需要这个
+    _run(["sh", "-c", "echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet"], check=False)
+
+
+def _chain_rules(table: str, chain: str) -> list[str]:
+    res = _iptables(table, "-S", chain, check=False)
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
 
 def _rule_exists(table: str, chain: str, comment: str) -> bool:
-    res = _iptables(table, "-C", chain, "-m", "comment", "--comment", comment, check=False)
-    return res.returncode == 0
+    """这条链里有没有带这个 comment 的规则。
+
+    注意：不能用 `iptables -C` 只带 comment 去查 —— 实际规则还带别的匹配条件，
+    那样永远查不到 → 每次都重复添加。
+    """
+    return any(comment in line for line in _chain_rules(table, chain))
+
+
+def _dedupe_rules() -> int:
+    """去掉重复的 berth 规则（历史上重复添加过的）。"""
+    removed = 0
+    for table, chain in (("nat", "POSTROUTING"), ("nat", "PREROUTING"), ("nat", "OUTPUT"),
+                         ("filter", "FORWARD"), ("filter", "INPUT")):
+        seen = set()
+        for line in _chain_rules(table, chain):
+            if f"{_COMMENT}:" not in line:
+                continue
+            comment = ""
+            for part in line.split():
+                if part.startswith("--comment"):
+                    comment = part
+            key = comment or line
+            if key in seen:
+                spec = line.split()
+                args = [t for t in spec if t != "-A"]
+                _iptables(table, "-D", chain, *args, check=False)
+                removed += 1
+            else:
+                seen.add(key)
+    if removed:
+        log.info("清理了 %d 条重复的防火墙规则", removed)
+    return removed
 
 
 def _ensure_global_rules() -> None:
@@ -451,6 +488,7 @@ def rebuild_all() -> dict:
     from state.db import list_service_rows, list_users
 
     _enable_forwarding()
+    _dedupe_rules()
     _ensure_global_rules()
 
     made, ports = 0, 0
