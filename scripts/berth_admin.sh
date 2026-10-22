@@ -7,6 +7,7 @@
 #   sudo scripts/berth_admin.sh status                # 看状态
 #   sudo scripts/berth_admin.sh token                 # 打印超级管理员令牌
 #   sudo scripts/berth_admin.sh tls                   # 生成自签证书并启用 HTTPS
+#   sudo scripts/berth_admin.sh tls-off               # 关掉 HTTPS（本地开发方便）
 #   sudo scripts/berth_admin.sh sign --name shakedown --user shop --ttl 3600 --out ~/.berth/token
 #   sudo scripts/berth_admin.sh list                  # 列出令牌
 #   sudo scripts/berth_admin.sh revoke tk-xxxx
@@ -60,7 +61,7 @@ read_token() {
 
 write_unit() {
   local tls_args=""
-  if [[ -f "$TLS_CRT" && -f "$TLS_KEY" ]]; then
+  if [[ -f "$TLS_CRT" && -f "$TLS_KEY" && ! -f "$TLS_DIR/tls.off" ]]; then
     tls_args="--ssl-certfile $TLS_CRT --ssl-keyfile $TLS_KEY"
   fi
   cat > "$UNIT_FILE" <<EOF
@@ -203,6 +204,22 @@ cmd_tls() {
   info "  python3 scripts/berth_client.py --ca $TLS_CRT get /system/info"
 }
 
+# 关掉 TLS（回到纯 HTTP；本地开发方便，公网部署别关）
+cmd_tls_off() {
+  need_root tls-off
+  say "从 systemd 单元里去掉 --ssl-* 并重启"
+  rm -f "$TLS_DIR/tls.off" 2>/dev/null || true
+  write_unit
+  systemctl restart "$SVC"
+  sleep 3
+  if curl -sf -m 3 "http://127.0.0.1:$BERTH_PORT/health" >/dev/null 2>&1; then
+    info "已回到 HTTP：http://127.0.0.1:$BERTH_PORT"
+  else
+    info "（没验过）"
+  fi
+  info "证书还留着：$TLS_CRT（要再开回来跑 $0 tls）"
+}
+
 # ─────────────────────────── status ───────────────────────────
 
 cmd_status() {
@@ -342,6 +359,7 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   token) shift; cmd_token "$@" ;;
   tls) shift; cmd_tls "$@" ;;
+  tls-off) shift; cmd_tls_off "$@" ;;
   sign) shift; cmd_sign "$@" ;;
   list) shift; cmd_list "$@" ;;
   revoke) shift; cmd_revoke "$@" ;;
