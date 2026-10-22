@@ -187,7 +187,9 @@ def install():
         n = len(prog) // 8
         buf = (SockFilter * n)()
         ctypes.memmove(ctypes.byref(buf), prog, len(prog))
-        fprog = SockFprog(n, ctypes.pointer(buf))
+        # 直接传数组（ctypes 会自动转成 POINTER(SockFilter)；
+        # 用 ctypes.pointer(array) 的类型对不上，会抛异常 → 过滤器装不上）
+        fprog = SockFprog(n, buf)
         return libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
                           ctypes.byref(fprog), 0, 0) == 0
     except Exception:
