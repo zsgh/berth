@@ -90,10 +90,15 @@ TARGET="$1"; PACKAGES="$2"; PIP_PKGS="$3"; COMMANDS_FILE="$4"
 
 echo "[2/6] apt 安装: ${PACKAGES:-（无）}"
 if [ -n "$PACKAGES" ]; then
+  # chroot 里挂个 /dev：apt 写日志、maintainer script 用 /dev/null 都要
+  # （这个挂载只在 namespace 里，脚本结束自动消失）
+  mkdir -p "$TARGET/dev"
+  mount --bind /dev "$TARGET/dev" 2>/dev/null || true
   # shellcheck disable=SC2086
   DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get update -qq
   # shellcheck disable=SC2086
   DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq --no-install-recommends $PACKAGES
+  umount "$TARGET/dev" 2>/dev/null || true
 fi
 
 echo "[3/6] pip 安装: ${PIP_PKGS:-（无）}"

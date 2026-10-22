@@ -91,6 +91,29 @@ def main():
     except ValueError as e:
         print("✔ 使用中拒绝:", str(e)[:50], "...")
 
+    # 老记录（0.3.0 之前建的，没有 spec 列）也要认得出占用 —— 踩过的坑
+    record_service(
+        service_id="svc-old",
+        name="old-style-redis",
+        template="redis",
+        unit="berth-svc-old",
+        host="localhost",
+        port=16380,
+        internal_port=6379,
+        status="stopped",
+        dir=str(TEST_HOME / "services" / "svc-old"),
+        persist=1,
+    )
+    used = images.images_in_use()
+    assert "redis" in used, used
+    assert any("old-style-redis" in v for v in used["redis"]), used
+    print("✔ 老记录（无 spec）也能识别占用:", used["redis"])
+    try:
+        images.delete_image("redis")
+        raise AssertionError("老记录占用的镜像不该能删")
+    except ValueError as e:
+        print("✔ 老记录占用也拒绝删除")
+
     print("=== 制作镜像：默认关闭（宿主 root 级操作）===")
     os.environ.pop("BERTH_ALLOW_IMAGE_BUILD", None)
     try:

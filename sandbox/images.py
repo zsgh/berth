@@ -135,23 +135,74 @@ def target_path_for(name: str) -> Path:
     return target
 
 
+def _service_image(row: dict) -> str | None:
+    """一个服务用的镜像名。
+
+    - 新记录：`spec.image`
+    - 老记录（0.3.0 之前创建的，spec 列是 NULL）：用 `template` 字段反查模板里的 image
+    """
+    spec = row.get("spec")
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except (TypeError, json.JSONDecodeError):
+            spec = None
+    if isinstance(spec, dict) and spec.get("image"):
+        return str(spec["image"])
+    template = row.get("template")
+    if template:
+        try:
+            from sandbox.service import load_template
+
+            return str(load_template(template).get("image") or "") or None
+        except Exception:
+            return None
+    return None
+
+
 def images_in_use() -> dict[str, list[str]]:
-    """哪些镜像正被服务用着（按服务名列出）。"""
+    """哪些镜像正被服务用着（按服务名列出）。
+
+    两种来源都算：
+    1. SQLite 里的服务记录（新记录看 spec.image，老记录回退到模板的 image）
+    2. 宿主上还挂着的 overlay 挂载（lowerdir 引用了这个镜像目录）
+       —— 这层是硬保护：就算 DB 记录丢了/是老的，也不让删正在被内核挂着的目录
+    """
     from state.db import list_service_rows
 
     used: dict[str, list[str]] = {}
     for row in list_service_rows():
-        spec = row.get("spec")
-        if isinstance(spec, str):
-            try:
-                spec = json.loads(spec)
-            except (TypeError, json.JSONDecodeError):
-                spec = {}
-        image = (spec or {}).get("image")
+        image = _service_image(row)
         if not image:
             continue
-        used.setdefault(str(image), []).append(str(row.get("name") or row.get("service_id")))
+        used.setdefault(image, []).append(str(row.get("name") or row.get("service_id")))
+
+    # 兜底：内核里还挂着的 overlay（lowerdir 指向某个镜像目录）
+    for path in mounted_image_dirs():
+        name = Path(path).name
+        prefix = Path(ROOTFS).name + "-"
+        if name.startswith(prefix):
+            used.setdefault(name[len(prefix):], []).append(f"（内核挂载中 {path}）")
     return used
+
+
+def mounted_image_dirs() -> list[str]:
+    """当前被 overlay 挂载引用的镜像目录（从 /proc/self/mountinfo 读）。"""
+    out: list[str] = []
+    try:
+        with open("/proc/self/mountinfo", "r") as f:
+            for line in f:
+                # mountinfo 的 super options 里带 lowerdir=/a:/b
+                if "lowerdir=" not in line:
+                    continue
+                for part in line.split():
+                    if part.startswith("lowerdir="):
+                        for p in part[len("lowerdir="):].split(":"):
+                            if p:
+                                out.append(p)
+    except OSError:
+        pass
+    return out
 
 
 def delete_image(name: str) -> dict:
@@ -186,9 +237,20 @@ def delete_image(name: str) -> dict:
     in_use = images_in_use()
     if name in in_use:
         raise ValueError(
-            f"镜像 {name!r} 正被服务使用（{', '.join(in_use[name])}）："
+            f"镜像 {name!r} 正被使用（{', '.join(in_use[name])}）："
             f"先删掉这些服务，或把它们换成别的镜像"
         )
+    # 路径级兜底：内核里还挂着这个目录（overlay lowerdir）就不许删
+    resolved = path.resolve()
+    for mounted in mounted_image_dirs():
+        try:
+            if Path(mounted).resolve() == resolved:
+                raise ValueError(
+                    f"镜像 {name!r} 正被内核挂载引用（{mounted}）：有服务在用，先停掉"
+                )
+        except OSError:
+            continue
+
     from state.db import list_image_builds
 
     for build in list_image_builds():
