@@ -129,16 +129,32 @@ def resolve_token(raw: str | None) -> Principal | None:
 # ─────────────────────────── 作用域判定 ───────────────────────────
 
 
-def in_scope(principal: Principal | None, labels: dict | None) -> bool:
-    """这个 principal 能不能碰带这些 labels 的资源。
+SHARED_KEY = "shared"
 
-    - admin：都能
+
+def is_shared(labels: dict | None) -> bool:
+    """是不是「共享资源」（labels 里 shared=true）。
+
+    共享资源 = 公共基础设施（比如所有项目共用的 mysql / redis）：
+    - **人人可见**（agent 要能找到它、拿到 host:port 去连）
+    - **只读**（除了 admin，谁都不能停/删/改）
+    """
+    return str((labels or {}).get(SHARED_KEY, "")).strip().lower() in ("1", "true", "yes")
+
+
+def in_scope(principal: Principal | None, labels: dict | None) -> bool:
+    """**可见性**：这个 principal 能不能看到带这些 labels 的资源。
+
+    - admin：全都能
+    - 共享资源（shared=true）：人人可见（不然 agent 找不到公共的 mysql/redis）
     - scoped：资源的 labels 必须**包含**作用域要求的全部 k=v
-    - 没标签的老资源：scoped 看不到（默认拒绝）
+    - 没标签的老资源：scoped 看不见（默认拒绝）
     """
     if principal is None:
         return False
     if principal.admin:
+        return True
+    if is_shared(labels):
         return True
     want = principal.scope_labels
     if not want:
@@ -148,6 +164,22 @@ def in_scope(principal: Principal | None, labels: dict | None) -> bool:
         if str(have.get(key)) != str(value):
             return False
     return True
+
+
+def can_modify(principal: Principal | None, labels: dict | None) -> bool:
+    """**可修改性**：能不能停 / 删 / 改这个资源。
+
+    - admin：全都能
+    - 共享资源：只读 —— 只有 admin 能动（agent 只该"用"它，不该"管"它）
+    - 其它：同 in_scope
+    """
+    if principal is None:
+        return False
+    if principal.admin:
+        return True
+    if is_shared(labels):
+        return False
+    return in_scope(principal, labels)
 
 
 def apply_scope(principal: Principal | None, labels: dict | None) -> dict:

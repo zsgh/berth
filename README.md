@@ -279,6 +279,31 @@ berth 有两种令牌，权限不同：
 | `BERTH_TOKEN`（环境变量，可挂多个） | **admin**：全部 + 宿主级操作（造/删镜像、签发令牌） | 你自己的控制面凭证 |
 | `POST /tokens` / `scripts/berth_token.py` 签发 | **非 admin**：能看能改服务/执行/产物 | 给 agent / agent 用 |
 
+### 「项目」到底填什么？
+
+**填 agent / 租户的名字**（不是服务名，不是每次运行的名字）：
+
+```bash
+# agent 叫 shakedown，服务它的是 shop 项目
+sudo scripts/berth_admin.sh sign --name shakedown --project shop
+```
+
+之后这个 agent 用这个 token 建的任何资源都会**自动**被打上 `project=shop` 标签
+（它自己传别的 project 标签会被改写），别的 agent 的 token 动不了。
+
+**公共资源怎么办**（所有项目共用的 mysql / redis）—— 标成共享：
+
+```bash
+sudo scripts/berth_admin.sh share mysql     # → labels: {"shared": "true"}
+```
+
+| | agent 的 scoped token | admin |
+|---|---|---|
+| 看到公共 mysql（拿 host:port 去连） | ✅ | ✅ |
+| 停 / 删公共 mysql | ❌ 403 | ✅ |
+
+### 作用域怎么用
+
 签发的 token 可以带**作用域**（按标签隔离）：
 
 ```bash

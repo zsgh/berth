@@ -26,6 +26,24 @@ curl -H "Authorization: Bearer $BERTH_TOKEN" http://127.0.0.1:9000/system/info
 
 **库里只存 token 的 sha256**，明文只在签发时返回一次（跟密码一样）。
 
+### 共享资源（shared=true）
+
+公共基础设施（所有项目共用的 mysql / redis）不能被某个项目"锁死"，也不能被 agent 乱删。
+给这类服务打上 `labels: {"shared": "true"}`：
+
+| | 带作用域的 token | admin |
+|---|---|---|
+| 看到它 | ✅（拿 host:port 去连） | ✅ |
+| 停 / 删 / 改 | ❌ `403` | ✅ |
+
+```bash
+# 管理员把公共库标成共享
+sudo scripts/berth_admin.sh share mysql
+# → labels = {"shared": "true"}
+```
+
+只有 admin 能创建/标记共享资源（scoped token 标 `shared=true` → `403`）。
+
 ### 作用域（按标签隔离）
 
 签发的 token 可以带**作用域**（复用 labels 机制）：

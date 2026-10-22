@@ -66,6 +66,18 @@ def main():
     assert resolve_token("bt_wrong") is None
     print("✔ 错的 token 解析为 None")
 
+    print("=== 共享资源（shared=true）：人人可见、只读 ===")
+    from sandbox.tokens import can_modify, in_scope, is_shared
+
+    shared = {"shared": "true"}
+    assert is_shared(shared) is True
+    assert is_shared({"project": "shop"}) is False
+    # 可见
+    assert in_scope(p, shared) is True, "共享资源对所有 scoped token 可见"
+    # 但不可改
+    assert can_modify(p, shared) is False, "共享资源对 scoped token 只读"
+    print("✔ 共享资源：可见但不可改")
+
     print("=== 作用域判定 ===")
     assert in_scope(p, {"project": "shop"}) is True
     assert in_scope(p, {"project": "shop", "run": "1"}) is True
@@ -197,6 +209,35 @@ def main():
         r = client.delete("/images/base", headers=H)
         assert r.status_code == 403, r.status_code
         print("✔ scoped token 不能删镜像")
+
+        # 共享资源：scoped token 看得见但改不了
+        record_service(
+            service_id="svc-shared", name="shared-db", template="mysql", unit="berth-svc-shared",
+            host="localhost", port=13306, internal_port=3306, status="stopped",
+            dir="/tmp/z", persist=1, labels='{"shared": "true"}',
+        )
+        r = client.get("/services/shared-db", headers=H)
+        assert r.status_code == 200, r.status_code
+        print("✔ scoped token 看得见共享服务")
+        r = client.delete("/services/shared-db", headers=H)
+        assert r.status_code == 403, (r.status_code, r.text)
+        print("✔ 但删不了 →", r.json()["detail"][:50])
+        r = client.post("/services/shared-db/stop", headers=H)
+        assert r.status_code == 403, r.status_code
+        print("✔ 也停不了")
+        # admin 可以
+        r = client.delete("/services/shared-db", headers=A)
+        assert r.status_code == 200, r.text
+        print("✔ admin 可以删共享服务")
+
+        # scoped token 不能创建共享资源
+        r = client.put(
+            "/services/new-shared",
+            headers=H,
+            json={"template": "redis", "labels": {"shared": "true"}},
+        )
+        assert r.status_code == 403, (r.status_code, r.text)
+        print("✔ scoped token 不能把资源标成共享 →", r.json()["detail"][:40])
 
         # 令牌管理 = admin only
         r = client.get("/tokens", headers=H)

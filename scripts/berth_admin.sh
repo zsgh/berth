@@ -10,6 +10,7 @@
 #   sudo scripts/berth_admin.sh list                  # 列出令牌
 #   sudo scripts/berth_admin.sh revoke tk-xxxx
 #   sudo scripts/berth_admin.sh rotate                # 轮换 admin token（旧的保留 5 分钟）
+#   sudo scripts/berth_admin.sh share mysql           # 把服务标成"共享资源"（人人可见、只读）
 #   sudo scripts/berth_admin.sh logs                  # 看 daemon 日志
 #
 # setup 会做这些事（都幂等）：
@@ -232,6 +233,30 @@ PY
 
 # ─────────────────────────── logs ───────────────────────────
 
+# ─────────────────────────── 共享资源 ───────────────────────────
+
+# 把服务标成"共享资源"（labels.shared=true）：
+#   - 所有带作用域的 token 都能看到它（agent 要能找到公共的 mysql/redis 拿 host:port）
+#   - 但只有 admin 能停/删/改它
+cmd_share() {
+  local name="${1:?用法: berth_admin.sh share <服务名>}"
+  local token
+  token=$(read_token) || die "找不到 admin token"
+  local body
+  body=$(python3 -c '
+import json,sys
+print(json.dumps({"labels": {"shared": "true"}}))
+')
+  echo "把 $name 标成共享资源（labels.shared=true）…"
+  curl -sf -X PUT "http://127.0.0.1:$BERTH_PORT/services/$name" \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "$body" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+print("   ", d.get("name"), "labels =", d.get("labels"))
+' || die "标记失败（服务不存在？）"
+}
+
 cmd_logs() {
   journalctl -u "$SVC" -f -n 50 --no-pager
 }
@@ -250,6 +275,7 @@ case "${1:-}" in
   revoke) shift; cmd_revoke "$@" ;;
   bootstrap) shift; cmd_bootstrap "$@" ;;
   rotate) shift; cmd_rotate "$@" ;;
+  share) shift; cmd_share "$@" ;;
   logs) shift; cmd_logs "$@" ;;
   -h|--help|help|"") usage 0 ;;
   *) echo "未知命令: $1" >&2; usage 1 ;;

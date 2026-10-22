@@ -19,7 +19,14 @@ import hashlib
 from fastapi import HTTPException, Request
 
 from sandbox import config
-from sandbox.tokens import Principal, apply_scope, in_scope, resolve_token
+from sandbox.tokens import (
+    Principal,
+    apply_scope,
+    can_modify,
+    in_scope,
+    is_shared,
+    resolve_token,
+)
 
 # 免鉴权的路径前缀（探活 / UI 静态资源）
 PUBLIC_PREFIXES = ("/health", "/ui")
@@ -127,16 +134,39 @@ def scope_labels(request: Request) -> dict:
 
 
 def can_touch(request: Request, labels: dict | None) -> bool:
-    """当前 token 能不能碰带这些 labels 的资源。"""
+    """当前 token 能不能**看到**带这些 labels 的资源。"""
     return in_scope(principal_of(request), labels)
 
 
-def forbid_out_of_scope(request: Request, labels: dict | None, what: str = "资源") -> None:
-    """作用域外 → 404（不泄露存在性）。"""
-    if not can_touch(request, labels):
+def forbid_out_of_scope(
+    request: Request, labels: dict | None, what: str = "资源", modify: bool = False
+) -> None:
+    """作用域检查。
+
+    - 看不见（不在作用域内）→ **404**（不泄露存在性）
+    - 看得见但不能改（共享资源 shared=true）→ **403**
+    """
+    principal = principal_of(request)
+    if not in_scope(principal, labels):
         raise HTTPException(status_code=404, detail=f"没有这个{what}")
+    if modify and not can_modify(principal, labels):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{what}是共享资源（shared=true）：当前令牌只能读，不能停/删/改",
+        )
 
 
 def scoped_labels(request: Request, labels: dict | None) -> dict:
     """创建资源时：强制打上作用域标签。"""
     return apply_scope(principal_of(request), labels)
+
+
+def forbid_shared_create(request: Request, labels: dict | None) -> None:
+    """只有 admin 能创建「共享资源」（shared=true）。"""
+    principal = principal_of(request)
+    if principal.admin:
+        return
+    if is_shared(labels or {}):
+        raise HTTPException(
+            status_code=403, detail="只有 admin 能创建共享资源（shared=true）"
+        )

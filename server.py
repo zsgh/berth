@@ -60,6 +60,7 @@ from api.auth import (
     actor_of,
     can_touch,
     forbid_out_of_scope,
+    forbid_shared_create,
     principal_of,
     require_admin,
     require_auth,
@@ -573,14 +574,14 @@ def scripts_delete_file(request: Request, task_id: str, file_path: str) -> dict:
 # ─────────────────────────── 长驻服务 ───────────────────────────
 
 
-def _service_or_404(request: Request, ref: str) -> dict:
-    """取服务记录；不在作用域内 → 404。"""
+def _service_or_404(request: Request, ref: str, modify: bool = False) -> dict:
+    """取服务记录；不在作用域内 → 404；共享资源且要改 → 403。"""
     from sandbox.service import resolve_ref
 
     row = resolve_ref(ref)
     if row is None:
         raise HTTPException(status_code=404, detail=f"no such service: {ref}")
-    forbid_out_of_scope(request, row.get("labels"), "服务")
+    forbid_out_of_scope(request, row.get("labels"), "服务", modify=modify)
     return row
 
 
@@ -599,7 +600,8 @@ def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
 
     existing = resolve_ref(ref)
     if existing is not None:
-        forbid_out_of_scope(request, existing.get("labels"), "服务")
+        forbid_out_of_scope(request, existing.get("labels"), "服务", modify=True)
+    forbid_shared_create(request, req.labels)
     try:
         return start_service(
             req.template or "",
@@ -657,7 +659,7 @@ def services_get(request: Request, ref: str) -> dict:
 @api.post("/services/{ref}/stop")
 def services_stop(request: Request, ref: str) -> dict:
     """停止服务（保留记录与数据卷）。"""
-    _service_or_404(request, ref)
+    _service_or_404(request, ref, modify=True)
     try:
         return stop_service(ref)
     except ValueError as e:
@@ -667,7 +669,7 @@ def services_stop(request: Request, ref: str) -> dict:
 @api.post("/services/{ref}/start")
 def services_start_existing(request: Request, ref: str) -> dict:
     """把已停止的服务原样再起（复用数据卷，端口优先复用）。"""
-    _service_or_404(request, ref)
+    _service_or_404(request, ref, modify=True)
     try:
         return start_existing_service(ref)
     except ValueError as e:
@@ -677,7 +679,7 @@ def services_start_existing(request: Request, ref: str) -> dict:
 @api.post("/services/{ref}/reset")
 def services_reset(request: Request, ref: str, keep_backup: bool = Query(False)) -> dict:
     """重置服务：停止 → 清数据卷 → 重放 init → 启动。"""
-    _service_or_404(request, ref)
+    _service_or_404(request, ref, modify=True)
     try:
         return reset_service(ref, keep_backup=keep_backup)
     except ValueError as e:
@@ -687,7 +689,7 @@ def services_reset(request: Request, ref: str, keep_backup: bool = Query(False))
 @api.delete("/services/{ref}")
 def services_delete(request: Request, ref: str, volumes: bool = False) -> dict:
     """停止并删除服务记录；?volumes=true 连数据卷一起删（docker rm -v 语义）。"""
-    _service_or_404(request, ref)
+    _service_or_404(request, ref, modify=True)
     try:
         return delete_service(ref, volumes=volumes)
     except ValueError as e:
@@ -755,7 +757,7 @@ def _service_labels_of(service_id: str | None) -> dict:
 @api.delete("/volumes/{service_id}")
 def volumes_delete(request: Request, service_id: str) -> dict:
     """清理**孤儿**卷（记录已删但卷还在磁盘上）。非孤儿卷返回 409。"""
-    forbid_out_of_scope(request, _service_labels_of(service_id), "卷")
+    forbid_out_of_scope(request, _service_labels_of(service_id), "卷", modify=True)
     try:
         return delete_volume(service_id)
     except ValueError as e:
