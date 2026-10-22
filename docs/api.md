@@ -709,6 +709,26 @@ curl -s -X DELETE "localhost:9000/images/redis?force=true"
 }
 ```
 
+### `GET /system/capacity`
+
+节点容量（给平台调度用）：CPU / 内存 / 磁盘 / 在跑的任务与服务 / **每个 user 的配额与用量** / 已装镜像清单。
+
+```json
+{
+  "home": "/var/lib/berth",
+  "cpu_cores": 8,
+  "memory": {"total_bytes": 16777216000, "available_bytes": 8589934592},
+  "disk": {"total_bytes": 107374182400, "used_bytes": 21474836480, "free_bytes": 85899345920, "percent": 20.0},
+  "active": {"runs": 2, "services": 3},
+  "users": [
+    {"user": "shop",
+     "quota": {"runs": 5, "memory_mb": 8192, "services": 3},
+     "usage": {"runs": 1, "memory_mb": 2048, "services": 2}}
+  ],
+  "images": ["base", "mysql", "postgres", "runner"]
+}
+```
+
 ### `GET /system/stats`
 
 宿主 CPU / 内存 / `BERTH_HOME` 所在磁盘的占用 + berth 自己的统计 + 告警。
@@ -795,6 +815,14 @@ python3 scripts/berth_token.py revoke tk-712c6e0d01
 
 建一个 user。`{name, quota_runs?, quota_memory_mb?, quota_services?, notes?}`
 （配额 `0` = 不限）。**令牌引用不存在的 user 时会自动建。**
+
+配额在**起任务 / 建服务**时检查，超了返回 `429`：
+
+```json
+{"detail": "并发任务数超配额（5/5）"}
+{"detail": "内存配额超限（8192+2048 > 8192 MB）"}
+{"detail": "服务数超配额（3/3）"}
+```
 
 ### `GET /users/{name}` / `GET /users/{name}/resources`
 

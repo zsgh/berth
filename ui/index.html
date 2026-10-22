@@ -99,6 +99,32 @@
           <h3>告警</h3>
           <ul><template x-for="a in (stats?.alerts || [])" :key="a"><li class="warn" x-text="a"></li></template></ul>
         </div>
+        <div class="card" x-show="capacity">
+          <h3>节点容量</h3>
+          <table class="kv">
+            <tr><th>CPU</th><td x-text="capacity?.cpu_cores + ' 核'"></td></tr>
+            <tr><th>可用内存</th><td x-text="human(capacity?.memory?.available_bytes)"></td></tr>
+            <tr><th>磁盘</th><td x-text="(capacity?.disk?.percent ?? '—') + '% · 可用 ' + human(capacity?.disk?.free_bytes)"></td></tr>
+            <tr><th>在跑任务 / 服务</th><td x-text="(capacity?.active?.runs ?? 0) + ' / ' + (capacity?.active?.services ?? 0)"></td></tr>
+            <tr><th>已装镜像</th><td class="small mono" x-text="(capacity?.images || []).join(', ')"></td></tr>
+          </table>
+          <div x-show="(capacity?.users || []).length">
+            <h3 style="margin-top:12px">各 user 配额</h3>
+            <table class="table">
+              <thead><tr><th>user</th><th>任务</th><th>服务</th><th>内存</th></tr></thead>
+              <tbody>
+                <template x-for="u in (capacity?.users || [])" :key="u.user">
+                  <tr>
+                    <td class="mono" x-text="u.user"></td>
+                    <td x-text="u.usage.runs + ' / ' + (u.quota.runs || '∞')"></td>
+                    <td x-text="u.usage.services + ' / ' + (u.quota.services || '∞')"></td>
+                    <td x-text="u.usage.memory_mb + ' / ' + (u.quota.memory_mb || '∞') + ' MB'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <div class="card">
           <h3>运行配置</h3>
           <table class="kv">
@@ -471,7 +497,7 @@
         </div>
 
         <table class="table" x-show="users.rows.length">
-          <thead><tr><th>名字</th><th>id</th><th>服务</th><th>执行</th><th>配额(任务/服务)</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>名字</th><th>id</th><th>服务</th><th>执行</th><th>配额(任务/服务/内存MB)</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
             <template x-for="u in users.rows" :key="u.id">
               <tr>
@@ -479,7 +505,7 @@
                 <td class="mono small" x-text="u.id"></td>
                 <td x-text="u.resources?.services ?? 0"></td>
                 <td x-text="u.resources?.runs ?? 0"></td>
-                <td class="small" x-text="(u.quota_runs || '∞') + ' / ' + (u.quota_services || '∞')"></td>
+                <td class="small" x-text="(u.quota_runs || '∞') + ' / ' + (u.quota_services || '∞') + ' / ' + (u.quota_memory_mb || '∞')"></td>
                 <td class="small mono" x-text="u.created_at"></td>
                 <td><button class="ghost sm" @click="users.remove(u)">删除</button></td>
               </tr>

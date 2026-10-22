@@ -146,6 +146,7 @@ function shell() {
     route: { name: 'overview', param: null },
     info: null,
     stats: null,
+    capacity: null,
     toast: '',
     toastKind: 'ok',
     toastTimer: null,
@@ -677,6 +678,7 @@ function shell() {
       try {
         if (name === 'overview') {
           this.stats = await api('/system/stats');
+          this.capacity = await api('/system/capacity');
         } else if (name === 'services') {
           await this.services.load();
           this.serviceCount = this.services.rows.length;
@@ -718,7 +720,10 @@ function shell() {
         const name = this.route.name;
         const p = (fn) => fn().catch(() => {});
         if (name === 'overview') {
-          p(async () => { this.stats = await api('/system/stats'); });
+          p(async () => {
+            this.stats = await api('/system/stats');
+            this.capacity = await api('/system/capacity');
+          });
         } else if (name === 'services') {
           p(async () => { await this.services.load(); this.serviceCount = this.services.rows.length; });
         } else if (name === 'runs') {

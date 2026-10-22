@@ -238,6 +238,23 @@ curl -s -X DELETE localhost:9000/images/myimg
 **开关**：`BERTH_NETNS=0` → 全部退回 host 网络（向后兼容 / 出问题一键回退）。
 `BERTH_HOST_BLOCK_PORTS=22,9000` → 沙箱网段不能访问的宿主端口。
 
+## 配额与容量（多租户）
+
+每个 user 可以设配额（`0` = 不限），超了 API 返回 `429`：
+
+```bash
+sudo scripts/berth_token.py adduser shop --quota-runs 5 --quota-services 3
+# 或 PATCH /users/shop {"quota_runs": 5, "quota_services": 3, "quota_memory_mb": 8192}
+```
+
+| 配额 | 含义 |
+|---|---|
+| `quota_runs` | 同时在跑的任务数 |
+| `quota_services` | 同时存在的服务数 |
+| `quota_memory_mb` | 同时占用的内存上限 |
+
+平台调度用 `GET /system/capacity`：CPU/内存/磁盘、在跑的任务与服务、**每个 user 的配额与用量**、已装镜像清单。
+
 ## 服务模板（templates/*.yaml）
 
 模板 ≈ 「`docker run` 的固定参数模板」，字段语义与 Kubernetes 对齐：
