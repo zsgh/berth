@@ -58,6 +58,24 @@ def main():
         del os.environ["BERTH_IMAGES_FILE"]
         importlib.reload(images)  # 还原
 
+    # 6) 目录大小：算的是目录内容，不是整个文件系统
+    #    （踩过的坑：shutil.disk_usage(path).used 对同一个盘上的目录全返回一样的数）
+    from sandbox.paths import dir_size
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / "img-a"
+        base.mkdir()
+        (base / "a.bin").write_bytes(b"x" * (1024 * 1024))       # 1 MiB
+        other = Path(td) / "img-b"
+        other.mkdir()
+        (other / "b.bin").write_bytes(b"y" * (4 * 1024 * 1024))  # 4 MiB
+        size_a = dir_size(base)
+        size_b = dir_size(other)
+        assert size_a and size_b, (size_a, size_b)
+        assert size_a != size_b, f"两个目录大小不应相同：{size_a} vs {size_b}"
+        assert size_b > size_a, (size_a, size_b)
+        print(f"✔ 目录大小各自独立：{size_a} vs {size_b}")
+
     print("全部通过 ✔")
 
 

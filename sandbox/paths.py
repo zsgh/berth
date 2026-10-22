@@ -59,6 +59,42 @@ def priv_cmd(*args) -> list[str]:
     return cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
 
 
+def dir_size(path) -> int | None:
+    """目录**实际占用**字节数。
+
+    注意：不要用 `shutil.disk_usage(path)` —— 那是整个文件系统的用量，
+    同一个盘上的多个目录会返回一模一样的数字（踩过这个坑）。
+
+    - Linux：`du -sb`（apparent size，字节）
+    - BSD/macOS 的 du 没有 `-b`：退到 `du -sk` × 1024
+    - 普通权限读不到时（沙箱产物是 uid 1000 的）用 sudo 兜底
+    """
+    if not path:
+        return 0
+    path = str(path)
+
+    def _run(argv: list[str]) -> int | None:
+        res = subprocess.run(argv, capture_output=True, text=True)
+        if res.returncode != 0:
+            return None
+        try:
+            return int(res.stdout.split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    size = _run(["du", "-sb", "--", path])
+    if size is not None:
+        return size
+    size = _run(["du", "-sk", path])  # BSD du
+    if size is not None:
+        return size * 1024
+    res = sudo("du", "-sb", "--", path, check=False)  # 权限不够
+    try:
+        return int(res.stdout.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 def ensure_base_dir() -> None:
     """确保 BASE_DIR 存在；非 root 模式下归当前用户所有。"""
     if BASE_DIR.exists():

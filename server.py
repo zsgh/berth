@@ -70,7 +70,7 @@ from sandbox.files import (
 )
 from sandbox.images import available_images
 from sandbox.overlayfs import run_script
-from sandbox.paths import BASE_DIR
+from sandbox.paths import BASE_DIR, dir_size
 from sandbox.paths import sudo as sudo_rm
 from sandbox.service import (
     ServiceConflictError,
@@ -728,12 +728,8 @@ def images_list() -> list[dict]:
     """已发现的镜像（只读）。"""
     out = []
     for name, path in sorted(available_images().items()):
-        size = None
-        try:
-            size = shutil.disk_usage(path).used
-        except OSError:
-            pass
-        out.append({"name": name, "path": path, "size_bytes": size})
+        # 目录实际占用（du -sb）；不能用 shutil.disk_usage —— 那是整个盘的用量
+        out.append({"name": name, "path": path, "size_bytes": dir_size(path)})
     return out
 
 

@@ -27,7 +27,15 @@ from sandbox.images import resolve_image
 from sandbox.mounts import normalize_mounts
 from sandbox.network import allocate_port, normalize_policy, release_port
 from sandbox.overlayfs import SETPRIV, exec_command, sandbox_shell, systemd_run_cmd
-from sandbox.paths import BASE_DIR, SANDBOX_GID, SANDBOX_UID, ensure_base_dir, priv_cmd, sudo
+from sandbox.paths import (
+    BASE_DIR,
+    SANDBOX_GID,
+    SANDBOX_UID,
+    dir_size,
+    ensure_base_dir,
+    priv_cmd,
+    sudo,
+)
 from sandbox.systemd_units import kill_unit, list_managed_units, stop_unit, unit_active
 from sandbox.tracing import span
 from state.db import (
@@ -822,17 +830,8 @@ def _refresh_row(row: dict) -> dict:
 
 
 def _dir_size(path) -> int | None:
-    """目录实际占用字节数（du -sb；普通权限读不到时用 sudo 兜底）。"""
-    if not path:
-        return 0
-    path = str(path)
-    res = subprocess.run(["du", "-sb", "--", path], capture_output=True, text=True)
-    if res.returncode != 0:
-        res = sudo("du", "-sb", "--", path, check=False)
-    try:
-        return int(res.stdout.split()[0])
-    except (ValueError, IndexError):
-        return None
+    """目录实际占用字节数（见 sandbox.paths.dir_size）。"""
+    return dir_size(path)
 
 
 def _systemd_usage(unit: str) -> dict:
