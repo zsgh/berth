@@ -65,10 +65,14 @@ def enabled() -> bool:
     return config.setting("BERTH_NETNS", "1") not in ("0", "false", "no", "off")
 
 
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    cmd: list[str], check: bool = True, stdin: str | None = None
+) -> subprocess.CompletedProcess:
     """跑一条特权命令（root 直接跑，否则 sudo -n）。"""
     argv = cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
-    res = subprocess.run(argv, capture_output=True, text=True)
+    res = subprocess.run(
+        argv, capture_output=True, text=True, input=stdin if stdin is not None else ""
+    )
     if check and res.returncode != 0:
         raise RuntimeError(
             f"{' '.join(cmd)} 失败: rc={res.returncode}\n{res.stderr.strip()}"
@@ -250,10 +254,8 @@ def _write_ns_resolvconf(ns: str) -> None:
 
 
 def _enable_forwarding() -> None:
-    try:
-        Path("/proc/sys/net/ipv4/ip_forward").write_text("1")
-    except OSError as e:
-        log.warning("打开 ip_forward 失败: %s", e)
+    """打开 ip 转发（沙箱要靠它出网）。"""
+    _run(["sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"], check=False)
 
 
 def _rule_exists(table: str, chain: str, comment: str) -> bool:
