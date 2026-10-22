@@ -363,9 +363,11 @@ def _ensure_user_rules(user: str, idx: int) -> None:
     host_veth, _ = veth_names(idx)
     comment = f"{_COMMENT}:{user}:nat"
     if not _rule_exists("nat", "POSTROUTING", comment):
+        # 只按**源地址**匹配：流量是从 veth 进来、从 eth0 出去的
+        # （写 -o <veth> 匹配不到，源地址不会被 NAT，出网就没回包）
         _iptables(
             "nat", "-A", "POSTROUTING",
-            "-s", cidr, "-o", host_veth,
+            "-s", cidr,
             "-m", "comment", "--comment", comment, "-j", "MASQUERADE",
             check=False,
         )
