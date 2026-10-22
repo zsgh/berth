@@ -240,6 +240,36 @@ curl -s -X DELETE localhost:9000/images/myimg
 `network`（出网限制）、`init`（初始化怎么执行）、`mounts`（只读挂载被测代码）。
 完整字段表见 [docs/api.md](docs/api.md)。
 
+## 管理员：一条龙
+
+在跑 berth 的那台机器上：
+
+```bash
+sudo scripts/berth_admin.sh setup      # 配置 + 开机自启 + 自检（幂等，能重复跑）
+sudo scripts/berth_admin.sh status     # 看状态（daemon / 服务 / token 情况）
+sudo scripts/berth_admin.sh token      # 打印 admin token
+sudo scripts/berth_admin.sh sign --name shakedown --project shop   # 给 agent 签受限令牌
+sudo scripts/berth_admin.sh list       # 列出令牌
+sudo scripts/berth_admin.sh revoke tk-xxxx
+sudo scripts/berth_admin.sh rotate     # 轮换 admin token（旧的 5 分钟内仍有效）
+sudo scripts/berth_admin.sh logs       # 看 daemon 日志
+```
+
+`setup` 做这些（都幂等）：
+
+1. `/etc/berth.env` —— `BERTH_TOKEN` / `BERTH_HOST` / `BERTH_PORT`（**600 root:root**）
+2. `/etc/systemd/system/berth.service` —— systemd 托管：开机自启 + 崩了自动拉起 + 日志进 journal
+3. 停掉手动 `nohup` 起的 daemon（免得抢端口），改由 systemd 托管
+4. 等健康检查通过，打印访问方式和"怎么给 agent 发令牌"
+
+**管理员日常就三件事**：
+
+| 场景 | 命令 |
+|---|---|
+| 给 agent 发一个管某个项目的令牌 | `sudo scripts/berth_admin.sh sign --name <agent> --project <项目>` |
+| agent 令牌泄了 | `sudo scripts/berth_admin.sh revoke tk-xxxx` |
+| admin token 要换 | `sudo scripts/berth_admin.sh rotate`（新旧并存 5 分钟，调用方无缝切） |
+
 ## 令牌与作用域
 
 berth 有两种令牌，权限不同：
