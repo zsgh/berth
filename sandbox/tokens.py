@@ -22,12 +22,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import secrets
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sandbox import config
+
+log = logging.getLogger(__name__)
 
 # ─────────────────────────── 主语 ───────────────────────────
 
@@ -181,3 +186,128 @@ def revoke_token(token_id: str) -> dict | None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ─────────────────────────── 本地令牌文件（A） ───────────────────────────
+
+
+def ensure_token_file() -> tuple[str | None, str | None]:
+    """确保本地令牌文件存在；不存在就生成一个（0600，目录 0700）。
+
+    返回 (路径, token)。没配 `BERTH_TOKEN_FILE` → (None, None)。
+
+    这样同机跑的 agent 直接读这个文件就能拿到 token —— 不用把长期凭证
+    复制到每个地方，也不用改代码。
+    """
+    path = config.token_file()
+    if path is None:
+        return None, None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
+        if path.is_file():
+            raw = path.read_text(encoding="utf-8").strip()
+            if raw:
+                return str(path), raw
+        raw = "bt_" + secrets.token_urlsafe(32)
+        path.write_text(raw + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return str(path), raw
+    except OSError as e:
+        log.warning("本地令牌文件创建失败: %s", e)
+        return None, None
+
+
+def token_file_path() -> str | None:
+    path = config.token_file()
+    return str(path) if path else None
+
+
+# ─────────────────────────── 一次性引导码（B） ───────────────────────────
+
+# 引导码失败的限流：{ip: (失败次数, 锁定到的时间戳)}
+_BOOTSTRAP_FAILS: dict[str, list] = {}
+_BOOTSTRAP_MAX_FAILS = 5
+_BOOTSTRAP_LOCK_SEC = 300
+
+
+def bootstrap_code_path():
+    """引导码文件（和令牌文件同目录）。"""
+    path = config.token_file()
+    if path is None:
+        return None
+    return path.parent / "bootstrap.code"
+
+
+def ensure_bootstrap_code() -> tuple[str | None, str | None]:
+    """生成/读取一次性引导码（写文件 0600，30 分钟内有效，用过即废）。"""
+    path = bootstrap_code_path()
+    if path is None:
+        return None, None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file():
+            age = time.time() - path.stat().st_mtime
+            if age <= config.bootstrap_ttl():
+                return str(path), path.read_text(encoding="utf-8").strip()
+            path.unlink(missing_ok=True)
+        # 无歧义字符集（去掉 0/O/1/I/L），方便手输
+        alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+        code = "".join(secrets.choice(alphabet) for _ in range(8))
+        path.write_text(code + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return str(path), code
+    except OSError as e:
+        log.warning("引导码生成失败: %s", e)
+        return None, None
+
+
+def bootstrap_locked(client: str) -> bool:
+    """这个客户端是不是被限流锁住了（失败次数到阈值才会锁）。"""
+    entry = _BOOTSTRAP_FAILS.get(client)
+    if not entry:
+        return False
+    if entry[1] > time.time():
+        return True
+    if entry[0] >= _BOOTSTRAP_MAX_FAILS:
+        _BOOTSTRAP_FAILS.pop(client, None)
+    return False
+
+
+def note_bootstrap_fail(client: str) -> None:
+    """记一次失败；累计到阈值（5 次）才锁 5 分钟。"""
+    entry = _BOOTSTRAP_FAILS.get(client)
+    now = time.time()
+    if not entry or (entry[1] > now):
+        entry = [entry[0] + 1 if entry else 1, 0.0]
+        _BOOTSTRAP_FAILS[client] = entry
+    else:
+        entry[0] += 1
+    if entry[0] >= _BOOTSTRAP_MAX_FAILS:
+        entry[1] = now + _BOOTSTRAP_LOCK_SEC
+
+
+def consume_bootstrap_code(code: str, client: str = "") -> bool:
+    """校验并消费引导码（一次性）。成功返回 True。"""
+    path = bootstrap_code_path()
+    if path is None or not path.is_file():
+        return False
+    try:
+        if time.time() - path.stat().st_mtime > config.bootstrap_ttl():
+            return False
+        stored = path.read_text(encoding="utf-8").strip()
+        if not stored or not secrets.compare_digest(stored, str(code or "").strip().upper()):
+            return False
+        path.unlink(missing_ok=True)  # 一次性
+        return True
+    except OSError:
+        return False

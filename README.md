@@ -263,6 +263,22 @@ curl -H "Authorization: Bearer bt_xxxx" localhost:9000/services
 **轮换零停机**：`BERTH_TOKEN=旧的,新的` → 改完重启 → 调用方切新的 → 验证通过 → 摘掉旧的。
 库里签发的 token 直接 `DELETE /tokens/{id}` 吊销，立刻失效。
 
+### 自动获取 token（不用把长期凭证复制来复制去）
+
+```bash
+# A. 本地令牌文件（推荐，同机 agent 零配置）
+#    berth 侧：BERTH_TOKEN_FILE=/run/berth/token  → 启动时自动生成（0600）
+#    agent 侧：读这个文件就行
+python3 scripts/berth_client.py get /services        # 自动找 token + 带 header
+
+# B. 一次性引导码（跨机接入，不用碰 admin 凭证）
+python3 scripts/berth_token.py bootstrap              # 看/生成引导码
+curl -X POST http://<berth>:9000/tokens/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "SJBBQ3P9", "name": "shakedown", "scope": {"labels": {"project": "shop"}}}'
+# → 换到一个受限 token（不是 admin，只能管自己作用域）
+```
+
 > 为什么沙箱在 host 网络下也必须配 token：沙箱里的代码能直连 `127.0.0.1:9000`，
 > 没有 token 就能删别的项目的服务和数据卷。token 防的就是这个（不是防外网）。
 
@@ -271,6 +287,8 @@ curl -H "Authorization: Bearer bt_xxxx" localhost:9000/services
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `BERTH_TOKEN` | - | Bearer token（**可逗号分隔多个** → 零停机轮换）；**未设置 = 不鉴权**（启动日志会警告） |
+| `BERTH_TOKEN_FILE` | - | 本地令牌文件：启动时不存在就**自动生成**（0600），同机 agent 直接读它 |
+| `BERTH_BOOTSTRAP_TTL` | `1800` | 一次性引导码有效期（秒） |
 | `BERTH_HOST` | `127.0.0.1` | 监听地址（对外监听需显式配置） |
 | `BERTH_PORT` | `9000` | 监听端口 |
 | `BERTH_HOME` | `/var/lib/berth` | 运行数据根目录（任务 overlay、workspace、服务卷） |

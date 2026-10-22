@@ -15,6 +15,8 @@
 | `BERTH_UI_ENABLED` | `1` | 是否托管 `/ui` 静态页面 |
 | `BERTH_UI_DIR` | `<仓库>/ui` | UI 静态目录 |
 | `BERTH_EVENTS_ENABLED` | `1` | 是否记录操作审计（`/events`） |
+| `BERTH_TOKEN_FILE` | - | 本地令牌文件：启动时不存在就自动生成（0600）；同机 agent 直接读它 |
+| `BERTH_BOOTSTRAP_TTL` | `1800` | 一次性引导码的有效期（秒） |
 | `BERTH_ALLOW_IMAGE_BUILD` | `0` | 是否允许**制作**镜像（宿主 root 级操作，默认关） |
 | `BERTH_ALLOW_IMAGE_DELETE` | `1` | 是否允许**删除**镜像（默认开） |
 """
@@ -32,15 +34,40 @@ def token() -> str | None:
     return values[0] if values else None
 
 
+def token_file() -> Path | None:
+    """本地令牌文件路径（BERTH_TOKEN_FILE）。
+
+    设了这个 → 启动时不存在就自动生成一个（0600），同机的 agent 直接读它，
+    不用把长期凭证复制到各个地方。
+    """
+    raw = (os.environ.get("BERTH_TOKEN_FILE") or "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
 def tokens() -> list[str]:
     """有效的 Bearer token 列表（admin）。
 
-    `BERTH_TOKEN` 可以是逗号/空格分隔的多个 —— 轮换时同时挂新旧两个，
-    客户端切完再把旧的摘掉（零停机）。
+    - `BERTH_TOKEN`：逗号/空格分隔的多个 —— 轮换时同时挂新旧两个，
+      客户端切完再把旧的摘掉（零停机）
+    - `BERTH_TOKEN_FILE` 指向的文件里那个（自动生成的本机 token）
     """
     raw = os.environ.get("BERTH_TOKEN") or ""
     out = [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+    path = token_file()
+    if path is not None:
+        try:
+            if path.is_file():
+                value = path.read_text(encoding="utf-8").strip()
+                if value:
+                    out.append(value)
+        except OSError:
+            pass
     return out
+
+
+def bootstrap_ttl() -> int:
+    """一次性引导码有效期（秒）。"""
+    return _int_env("BERTH_BOOTSTRAP_TTL", 1800)
 
 
 def bind_host() -> str:

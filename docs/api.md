@@ -41,6 +41,42 @@ curl -H "Authorization: Bearer $BERTH_TOKEN" http://127.0.0.1:9000/system/info
 - 作用域外的资源 → `404`（不泄露存在性）
 - 老资源（没有标签的）→ scoped token 看不见（默认拒绝）
 
+### 自动获取 token
+
+三种方式，按需选：
+
+**A. 本地令牌文件**（同机 agent，零配置）
+
+设 `BERTH_TOKEN_FILE=/run/berth/token` → berth 启动时文件不存在就**自动生成**一个
+（0600，目录 0700；重启不变）。同机跑的 agent 直接读这个文件：
+
+```python
+from berth_client import Berth      # scripts/berth_client.py
+b = Berth()                          # 自动读 BERTH_TOKEN / BERTH_TOKEN_FILE
+b.get("/services")
+```
+
+**B. 一次性引导码**（跨机接入，不用碰 admin 凭证）
+
+berth 启动时在令牌文件同目录生成 `bootstrap.code`（0600，30 分钟有效、只能用一次），
+启动日志里也会打印：
+
+```bash
+curl -X POST http://<berth>:9000/tokens/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "SJBBQ3P9", "name": "shakedown", "scope": {"labels": {"project": "shop"}}}'
+```
+
+换来的令牌**不是 admin**（只能管自己作用域内的资源），也不能再签发令牌。
+连续错码 5 次会锁 5 分钟。
+
+**C. 客户端封装**
+
+```bash
+python3 scripts/berth_client.py get /services
+python3 scripts/berth_client.py post /scripts/run '{"code":"print(1)"}'
+```
+
 ### 轮换（零停机）
 
 `BERTH_TOKEN` 可以挂多个（逗号分隔）→ 换的时候先加新的：
@@ -670,6 +706,18 @@ curl -s -X DELETE "localhost:9000/images/redis?force=true"
 ---
 
 ## 访问令牌
+
+### `POST /tokens/bootstrap`
+
+用一次性引导码换令牌（**这个接口本身不需要已有 token**）。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `code` | string | 引导码（`BERTH_TOKEN_FILE` 同目录的 `bootstrap.code`） |
+| `name` | string | 令牌名 |
+| `scope` | object? | 作用域；不给 = 能操作所有服务/执行（但不是 admin） |
+
+返回同 `POST /tokens`（含明文 `token`）。错码 `401`；连续错码 5 次 → `429`。
 
 ### `GET /tokens`（admin）
 

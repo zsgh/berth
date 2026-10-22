@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -61,6 +60,11 @@ def main() -> int:
 
     p_revoke = sub.add_parser("revoke", help="吊销令牌")
     p_revoke.add_argument("token_id")
+
+    p_boot = sub.add_parser("bootstrap", help="生成/查看一次性引导码")
+    p_boot.add_argument("--show", action="store_true", help="只显示当前的，不重新生成")
+
+    sub.add_parser("whoami", help="看当前 token 的身份（调 /system/info）")
 
     args = parser.parse_args()
 
@@ -118,6 +122,33 @@ def main() -> int:
                 return 0
         print("没有这个令牌", file=sys.stderr)
         return 1
+
+    if args.cmd == "bootstrap":
+        from sandbox.tokens import ensure_bootstrap_code
+
+        path, code = ensure_bootstrap_code()
+        if not path:
+            print("未配置 BERTH_TOKEN_FILE（没有引导码这个概念）", file=sys.stderr)
+            return 1
+        print(f"引导码文件: {path}（0600）")
+        print(f"引导码    : {code}")
+        print()
+        print("跨机接入（换一个受限令牌，不用给 admin 凭证）：")
+        print(f"""  curl -X POST http://<berth>:9000/tokens/bootstrap \\
+    -H 'Content-Type: application/json' \\
+    -d '{{"code": "{code}", "name": "shakedown", "scope": {{"labels": {{"project": "shop"}}}}}}'""")
+        return 0
+
+    if args.cmd == "whoami":
+        from scripts.berth_client import Berth  # type: ignore
+
+        try:
+            info = Berth().get("/system/info")
+        except Exception as e:
+            print(f"错误: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps(info.get("principal"), ensure_ascii=False, indent=2))
+        return 0
 
     if args.cmd == "revoke":
         from sandbox.tokens import revoke_token

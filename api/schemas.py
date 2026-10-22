@@ -133,6 +133,17 @@ class TokenRequest(BaseModel):
     )
 
 
+class BootstrapRequest(BaseModel):
+    """POST /tokens/bootstrap 请求体：用一次性引导码换令牌。"""
+
+    code: str = Field(..., description="引导码（berth 启动时生成，写在本地文件里）")
+    name: str = Field(..., description="令牌名（审计里显示）")
+    scope: dict | None = Field(
+        None,
+        description='作用域，如 {"labels": {"project": "shop"}}；不给 = 能操作所有服务/执行',
+    )
+
+
 class ImageBuildRequest(BaseModel):
     """POST /images 请求体：制作一个沙箱镜像（rootfs-<name>）。"""
 

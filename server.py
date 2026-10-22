@@ -65,7 +65,13 @@ from api.auth import (
     require_auth,
     scoped_labels,
 )
-from api.schemas import EnsureRequest, ImageBuildRequest, RunRequest, TokenRequest
+from api.schemas import (
+    BootstrapRequest,
+    EnsureRequest,
+    ImageBuildRequest,
+    RunRequest,
+    TokenRequest,
+)
 from sandbox import config
 from sandbox.files import (
     file_tree,
@@ -114,6 +120,28 @@ VERSION = "0.3.0"
 log = logging.getLogger("berth")
 
 
+def _bootstrap_local_token() -> None:
+    """启动时：生成本地令牌文件（BERTH_TOKEN_FILE）+ 一次性引导码。
+
+    - 本地令牌文件：同机的 agent 直接读它就能调用（零配置，不用复制凭证）
+    - 引导码：跨机场景用短码换一个**受限** token（不用碰 admin 凭证）
+    """
+    from sandbox.tokens import ensure_bootstrap_code, ensure_token_file
+
+    path, raw = ensure_token_file()
+    if path and raw:
+        log.info("本地令牌文件：%s（0600，同机 agent 可直接读）", path)
+    code_path, code = ensure_bootstrap_code()
+    if code_path and code:
+        log.info(
+            "一次性引导码：%s（%s，%d 分钟内有效、只能用一次）",
+            code,
+            code_path,
+            config.bootstrap_ttl() // 60,
+        )
+        log.info("  → 跨机接入：curl -X POST %s/tokens/bootstrap -d '{\"code\": \"%s\"}'", "http://<berth>:9000", code)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动：初始化 DB → 恢复服务状态 → 清理孤儿资源。"""
@@ -121,6 +149,7 @@ async def lifespan(app: FastAPI):
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     init_db()
+    _bootstrap_local_token()
     if not config.token():
         log.warning(
             "BERTH_TOKEN 未设置：API 不鉴权（仅建议本机自用）。"
@@ -149,6 +178,9 @@ app = FastAPI(title="berth", version=VERSION, lifespan=lifespan)
 
 # 所有业务接口都要鉴权（B1）；/health 和 /ui 静态资源除外
 api = APIRouter(dependencies=[Depends(require_auth)])
+
+# 免鉴权的接口：引导码换 token（本身就是"用码换凭证"，不能先要求有凭证）
+public_api = APIRouter()
 
 
 @app.middleware("http")
@@ -991,6 +1023,43 @@ def events_list(
 # ─────────────────────────── 访问令牌 ───────────────────────────
 
 
+@public_api.post("/tokens/bootstrap", status_code=201)
+def tokens_bootstrap(req: BootstrapRequest, request: Request) -> dict:
+    """用一次性引导码换一个**受限**令牌（不需要先有 admin 凭证）。
+
+    引导码在 `BERTH_TOKEN_FILE` 同目录的 `bootstrap.code`（0600），
+    由 berth 启动时生成，30 分钟内有效、只能用一次。
+    签出来的令牌**不是 admin**，也**不能**再签发令牌 —— 只能管自己作用域内的资源。
+    """
+    from sandbox.tokens import (
+        bootstrap_locked,
+        consume_bootstrap_code,
+        create_token,
+        note_bootstrap_fail,
+    )
+
+    client = request.client.host if request.client else "unknown"
+    if bootstrap_locked(client):
+        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
+    if not consume_bootstrap_code(req.code, client):
+        note_bootstrap_fail(client)
+        raise HTTPException(status_code=401, detail="引导码无效或已过期")
+    try:
+        record, raw = create_token(req.name, req.scope)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    record_event(
+        "POST /tokens/bootstrap",
+        target=record["id"],
+        actor="bootstrap",
+        method="POST",
+        path=request.url.path,
+        status=201,
+        detail={"name": record["name"], "scope": record["scope"]},
+    )
+    return {**record, "token": raw, "note": "token 明文只显示这一次，请立刻保存"}
+
+
 @api.get("/tokens")
 def tokens_list(request: Request) -> list[dict]:
     """列出访问令牌（不返回 token 本身，只返回元信息）。"""
@@ -1032,6 +1101,7 @@ def tokens_revoke(request: Request, token_id: str) -> dict:
 
 # ─────────────────────────── 挂载 ───────────────────────────
 
+app.include_router(public_api)
 app.include_router(api)
 
 # UI（静态页，随 berth 一起部署；不新增进程、不引入 Node 构建链）
