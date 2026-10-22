@@ -190,8 +190,10 @@ def install():
         # 直接传数组（ctypes 会自动转成 POINTER(SockFilter)；
         # 用 ctypes.pointer(array) 的类型对不上，会抛异常 → 过滤器装不上）
         fprog = SockFprog(n, buf)
+        # byref() 不能直接配 c_ulong 参数 → 显式取地址
+        addr = ctypes.cast(ctypes.byref(fprog), ctypes.c_void_p).value
         return libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-                          ctypes.byref(fprog), 0, 0) == 0
+                          addr, 0, 0) == 0
     except Exception:
         return False
 
