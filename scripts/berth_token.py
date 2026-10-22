@@ -140,7 +140,8 @@ def main() -> int:
         return 0
 
     if args.cmd == "whoami":
-        from scripts.berth_client import Berth  # type: ignore
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from berth_client import Berth
 
         try:
             info = Berth().get("/system/info")

@@ -52,6 +52,8 @@ class Principal:
         """审计里的标识（不落 token 明文）。"""
         if self.admin and self.source == "env":
             return "admin:env"
+        if self.admin and self.source == "file":
+            return "admin:local"
         if self.token_id:
             return f"token:{self.token_id[:12]}"
         return "anonymous"
@@ -88,9 +90,14 @@ def resolve_token(raw: str | None) -> Principal | None:
     raw = raw.strip()
 
     # 1) 环境变量里的 admin token（可逗号分隔多个 → 轮换时同时挂两个）
-    for candidate in config.tokens():
+    for candidate in config.env_tokens():
         if secrets.compare_digest(candidate, raw):
             return Principal(admin=True, name="admin", source="env")
+
+    # 1b) 本地令牌文件里的那个（自动生成的同机 token）
+    from_file = config.file_token()
+    if from_file and secrets.compare_digest(from_file, raw):
+        return Principal(admin=True, name="local", source="file")
 
     # 2) 库里的 token（可能带作用域）
     from state.db import get_token_by_hash, touch_token

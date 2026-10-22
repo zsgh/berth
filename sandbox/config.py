@@ -44,24 +44,32 @@ def token_file() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
-def tokens() -> list[str]:
-    """有效的 Bearer token 列表（admin）。
-
-    - `BERTH_TOKEN`：逗号/空格分隔的多个 —— 轮换时同时挂新旧两个，
-      客户端切完再把旧的摘掉（零停机）
-    - `BERTH_TOKEN_FILE` 指向的文件里那个（自动生成的本机 token）
-    """
+def env_tokens() -> list[str]:
+    """`BERTH_TOKEN` 里的 token（可逗号分隔多个 → 零停机轮换）。"""
     raw = os.environ.get("BERTH_TOKEN") or ""
-    out = [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+    return [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+
+
+def file_token() -> str | None:
+    """`BERTH_TOKEN_FILE` 里的那个 token（启动时自动生成的）。"""
     path = token_file()
-    if path is not None:
-        try:
-            if path.is_file():
-                value = path.read_text(encoding="utf-8").strip()
-                if value:
-                    out.append(value)
-        except OSError:
-            pass
+    if path is None:
+        return None
+    try:
+        if path.is_file():
+            value = path.read_text(encoding="utf-8").strip()
+            return value or None
+    except OSError:
+        pass
+    return None
+
+
+def tokens() -> list[str]:
+    """有效的 Bearer token 列表（admin）：环境变量里的 + 本地令牌文件里的。"""
+    out = list(env_tokens())
+    value = file_token()
+    if value:
+        out.append(value)
     return out
 
 
