@@ -284,13 +284,37 @@ def _chain_rules(table: str, chain: str) -> list[str]:
     return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
 
+def _comment_of(line: str) -> str:
+    """取规则里 --comment 的值（精确匹配用）。"""
+    parts = line.split()
+    for i, part in enumerate(parts):
+        if part == "--comment" and i + 1 < len(parts):
+            return parts[i + 1].strip('"')
+    return ""
+
+
+def _rules_with_comment(table: str, chain: str, comment: str) -> list[str]:
+    """链里带这个 comment（精确匹配）的规则。"""
+    return [line for line in _chain_rules(table, chain) if _comment_of(line) == comment]
+
+
 def _rule_exists(table: str, chain: str, comment: str) -> bool:
     """这条链里有没有带这个 comment 的规则。
 
     注意：不能用 `iptables -C` 只带 comment 去查 —— 实际规则还带别的匹配条件，
     那样永远查不到 → 每次都重复添加。
     """
-    return any(comment in line for line in _chain_rules(table, chain))
+    return bool(_rules_with_comment(table, chain, comment))
+
+
+def _ensure_rule(table: str, chain: str, comment: str, args: list[str]) -> None:
+    """确保链里有且只有一条带该 comment 的规则（先删旧的，再按当前定义加）。
+
+    这样规则定义改了（比如加了 -o 或改了匹配条件）也能生效，不会留着旧版。
+    """
+    for line in _rules_with_comment(table, chain, comment):
+        _iptables(table, "-D", chain, *_rule_args(line), check=False)
+    _iptables(table, "-A", chain, *args, check=False)
 
 
 def _dedupe_rules() -> int:
@@ -325,24 +349,20 @@ def _ensure_global_rules() -> None:
     - INPUT：10.200/16 → 宿主敏感端口 DROP（沙箱连不到 sshd / berth API）
     """
     # user 之间不通
-    if not _rule_exists("filter", "FORWARD", f"{_COMMENT}:cross-user"):
-        _iptables(
-            "filter", "-A", "FORWARD",
-            "-s", f"{SUBNET_BASE}.0.0/16", "-d", f"{SUBNET_BASE}.0.0/16",
-            "-m", "comment", "--comment", f"{_COMMENT}:cross-user", "-j", "DROP",
-            check=False,
-        )
+    _ensure_rule(
+        "filter", "FORWARD", f"{_COMMENT}:cross-user",
+        ["-s", f"{SUBNET_BASE}.0.0/16", "-d", f"{SUBNET_BASE}.0.0/16",
+         "-m", "comment", "--comment", f"{_COMMENT}:cross-user", "-j", "DROP"],
+    )
     # 沙箱 → 宿主敏感端口
     ports = _block_ports()
     if ports:
-        if not _rule_exists("filter", "INPUT", f"{_COMMENT}:host-block"):
-            _iptables(
-                "filter", "-A", "INPUT",
-                "-s", f"{SUBNET_BASE}.0.0/16", "-p", "tcp",
-                "-m", "multiport", "--dports", ",".join(str(p) for p in ports),
-                "-m", "comment", "--comment", f"{_COMMENT}:host-block", "-j", "DROP",
-                check=False,
-            )
+        _ensure_rule(
+            "filter", "INPUT", f"{_COMMENT}:host-block",
+            ["-s", f"{SUBNET_BASE}.0.0/16", "-p", "tcp",
+             "-m", "multiport", "--dports", ",".join(str(p) for p in ports),
+             "-m", "comment", "--comment", f"{_COMMENT}:host-block", "-j", "DROP"],
+        )
 
 
 def _block_ports() -> list[int]:
@@ -361,26 +381,24 @@ def _ensure_user_rules(user: str, idx: int) -> None:
     """user 级别的规则：出网 NAT。"""
     cidr = subnet_for(idx)
     host_veth, _ = veth_names(idx)
+    # 只按**源地址**匹配：流量是从 veth 进来、从 eth0 出去的
+    # （写 -o <veth> 匹配不到，源地址不会被 NAT，出网就没回包）
     comment = f"{_COMMENT}:{user}:nat"
-    if not _rule_exists("nat", "POSTROUTING", comment):
-        # 只按**源地址**匹配：流量是从 veth 进来、从 eth0 出去的
-        # （写 -o <veth> 匹配不到，源地址不会被 NAT，出网就没回包）
-        _iptables(
-            "nat", "-A", "POSTROUTING",
-            "-s", cidr,
-            "-m", "comment", "--comment", comment, "-j", "MASQUERADE",
-            check=False,
-        )
+    _ensure_rule(
+        "nat", "POSTROUTING", comment,
+        ["-s", cidr, "-m", "comment", "--comment", comment, "-j", "MASQUERADE"],
+    )
 
 
 def _remove_user_rules(user: str, idx: int) -> None:
-    """删掉 user 的所有规则（按 comment 匹配）。"""
+    """删掉 user 的所有规则（按 comment 前缀匹配）。"""
+    prefix = f"{_COMMENT}:{user}:"
     for table, chain in (("nat", "POSTROUTING"), ("nat", "PREROUTING"), ("nat", "OUTPUT")):
         while True:
-            res = _iptables(
-                table, "-S", chain, check=False
-            )
-            lines = [l for l in res.stdout.splitlines() if f"{_COMMENT}:{user}:" in l]
+            lines = [
+                l for l in _chain_rules(table, chain)
+                if l.startswith("-A") and _comment_of(l).startswith(prefix)
+            ]
             if not lines:
                 break
             _iptables(table, "-D", chain, *_rule_args(lines[0]), check=False)
@@ -410,22 +428,18 @@ def add_service_port(user: str, port: int) -> None:
         ("OUTPUT", ["-d", "127.0.0.1", "-p", "tcp", "--dport", str(port)]),
     ):
         comment = f"{_COMMENT}:{user}:{port}"
-        if not _rule_exists("nat", chain, comment):
-            _iptables(
-                "nat", "-A", chain, *extra,
-                "-m", "comment", "--comment", comment,
-                "-j", "DNAT", "--to-destination", f"{ip}:{port}",
-                check=False,
-            )
+        _ensure_rule(
+            "nat", chain, comment,
+            [*extra, "-m", "comment", "--comment", comment,
+             "-j", "DNAT", "--to-destination", f"{ip}:{port}"],
+        )
     # hairpin：宿主本地访问时，源地址是 127.0.0.1 → 改写成网关 IP（否则 ns 里的回包走不通）
     comment = f"{_COMMENT}:{user}:{port}:hair"
-    if not _rule_exists("nat", "POSTROUTING", comment):
-        _iptables(
-            "nat", "-A", "POSTROUTING",
-            "-s", "127.0.0.1", "-d", ip, "-p", "tcp", "--dport", str(port),
-            "-m", "comment", "--comment", comment, "-j", "MASQUERADE",
-            check=False,
-        )
+    _ensure_rule(
+        "nat", "POSTROUTING", comment,
+        ["-s", "127.0.0.1", "-d", ip, "-p", "tcp", "--dport", str(port),
+         "-m", "comment", "--comment", comment, "-j", "MASQUERADE"],
+    )
 
 
 def remove_service_port(user: str, port: int) -> None:
