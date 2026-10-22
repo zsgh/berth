@@ -496,6 +496,14 @@ function shell() {
       if (saved) {
         this.tokenInput = saved;
         await this.login();
+      } else {
+        // 服务端没配 BERTH_TOKEN（不鉴权）时直接进，不用登录
+        try {
+          this.info = await api('/system/info');
+          this.loggedIn = true;
+          this.healthClass = 'ok';
+          this.healthText = 'berth 正常 · v' + (this.info.version || '') + '（未启用鉴权）';
+        } catch (e) { /* 需要 token：停在登录页 */ }
       }
       this.onRoute();
       this.startPolling();
