@@ -43,6 +43,7 @@ def start_async(
     mounts: list | None = None,
     labels: dict | None = None,
     owner: str | None = None,
+    netns: str | None = None,
 ) -> dict:
     """启动一次异步执行，立刻返回（不阻塞）。"""
     task_id = str(task_id) if task_id else f"auto-{uuid.uuid4().hex[:12]}"
@@ -60,6 +61,7 @@ def start_async(
         mounts=mounts,
         labels=labels,
         owner=owner,
+        netns=netns,
         output_dir=_output_dir(task_id, "pending"),
     )
     return _launch(prepared)

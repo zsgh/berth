@@ -168,6 +168,12 @@ async def lifespan(app: FastAPI):
     else:
         log.info("API 鉴权已启用（Bearer token）")
     try:
+        from sandbox import netns as netns_mod
+
+        netns_mod.rebuild_all()
+    except Exception as e:
+        log.warning("重建 netns 失败: %s", e)
+    try:
         recover_services()
     except Exception as e:  # 没有 systemd（比如 macOS 直跑）时不阻塞 daemon 启动
         log.warning("恢复服务状态失败（宿主机没有 systemd？）: %s", e)
@@ -295,6 +301,10 @@ def scripts_run(req: RunRequest, request: Request) -> dict:
         labels=scoped_labels(request, req.labels),
         owner=owner_for(request, req.owner),
     )
+    # 沙箱跑在 owner 的 netns 里（同 user 的服务同 ns → 127.0.0.1 互通；跨 user 不通）
+    from sandbox import netns as netns_mod
+
+    kwargs["netns"] = netns_mod.netns_for_user(kwargs.get("owner"))
     try:
         if req.async_:
             return runs_mod.start_async(**kwargs)

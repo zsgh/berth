@@ -405,6 +405,14 @@ def exec_prefix(user: str | None) -> list[str]:
     return ["ip", "netns", "exec", ns]
 
 
+def netns_for_user(user: str | None) -> str | None:
+    """user 的 netns 名（没建 / 没启用 → None）。"""
+    if not enabled() or not user:
+        return None
+    ns = netns_name(user)
+    return ns if _netns_exists(ns) else None
+
+
 def service_host(user: str | None) -> str:
     """服务在 netns 里的地址（宿主健康检查/平台访问用）。"""
     if not enabled() or not user:

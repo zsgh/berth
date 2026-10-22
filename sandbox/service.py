@@ -383,7 +383,9 @@ def check_health(tpl: dict, host: str, port: int, timeout: float | None = None, 
 # ─────────────────────────── 启动 ───────────────────────────
 
 
-def _start_unit(unit: str, inner: str, tpl: dict, network: dict | None = None) -> None:
+def _start_unit(
+    unit: str, inner: str, tpl: dict, network: dict | None = None, netns: str | None = None
+) -> None:
     resources = tpl.get("resources") or {}
     cmd = systemd_run_cmd(
         inner,
@@ -393,6 +395,7 @@ def _start_unit(unit: str, inner: str, tpl: dict, network: dict | None = None) -
         cpu_percent=int(resources.get("cpu_percent", 100)),
         tasks_max=128,
         network=network,
+        netns=netns,
     )
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if res.returncode != 0:
@@ -605,9 +608,22 @@ def _start_service_impl(
 
         network = normalize_policy(tpl.get("network"))
 
+        # 4b. 进 user 的 netns（服务与该 user 的沙箱同 ns → 127.0.0.1 互通、跨 user 不通）
+        netns = None
+        health_host = host
+        if owner:
+            from sandbox import netns as netns_mod
+
+            info = netns_mod.ensure_netns(owner)
+            netns = info.get("netns")
+            if netns:
+                health_host = info.get("ip") or host
+                # 把端口发布出去（宿主 :port → ns 里的同号端口）
+                netns_mod.add_service_port(owner, port)
+
         # 5. systemd 托管启动
         try:
-            _start_unit(unit, inner, tpl, network=network)
+            _start_unit(unit, inner, tpl, network=network, netns=netns)
         except Exception as e:
             raise RuntimeError(f"服务启动失败: {e}") from e
         record_service(
@@ -633,7 +649,7 @@ def _start_service_impl(
         )
 
         # 6. 等待健康检查（unit 挂了会提前失败，不干等）
-        if not check_health(tpl, host, port, timeout, unit=unit):
+        if not check_health(tpl, health_host, port, timeout, unit=unit):
             logs = subprocess.run(
                 priv_cmd("journalctl", "-u", f"{unit}.service", "--no-pager", "-n", "20"),
                 capture_output=True,
@@ -1153,6 +1169,16 @@ def _stop_service_impl(service_id: str, purge: bool = False) -> dict:
     # persist: false → 数据卷也删掉
     if not row["persist"]:
         _rm_rf(Path(row["dir"]) / "volumes")
+
+    # 撤掉端口发布规则（netns 模式）
+    owner = row.get("owner")
+    if owner and row.get("port"):
+        try:
+            from sandbox import netns as netns_mod
+
+            netns_mod.remove_service_port(owner, int(row["port"]))
+        except Exception as e:  # 清理失败不该挡住停止流程
+            log.warning("撤掉端口规则失败: %s", e)
 
     release_port(service_id)
     update_service_status(service_id, "stopped")

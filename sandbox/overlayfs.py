@@ -117,6 +117,7 @@ def systemd_run_cmd(
     cpu_percent: int = 50,
     tasks_max: int = 64,
     network: dict | None = None,
+    netns: str | None = None,
 ) -> list[str]:
     """组装 `sudo systemd-run` 命令。
 
@@ -137,8 +138,12 @@ def systemd_run_cmd(
         "-p", f"TasksMax={tasks_max}",
     ]
     cmd += systemd_network_properties(network)
+    cmd += ["--"]
+    if netns:
+        # 进 user 的网络命名空间（沙箱与服务在同一个 ns → 127.0.0.1 互通，
+        # 跨 user 不通）。ip netns exec 需要 root，这里在 systemd-run 的 root 上下文里跑。
+        cmd += ["ip", "netns", "exec", netns]
     cmd += [
-        "--",
         "unshare", "--propagation", "private", "--pid", "--mount", "--ipc", "--uts", "--fork",
         "bash", "-c", inner,
     ]
@@ -260,6 +265,7 @@ def prepare_run(
     mounts: list | None = None,
     labels: dict | None = None,
     owner: str | None = None,
+    netns: str | None = None,
     output_dir: Path | None = None,
 ) -> PreparedRun:
     """校验参数 + 准备 overlay 目录 + 组装命令（不执行）。"""
@@ -339,6 +345,7 @@ def prepare_run(
         cpu_percent=cpu_percent,
         tasks_max=tasks_max,
         network=policy,
+        netns=netns,
     )
 
     if output_dir is not None:
@@ -471,6 +478,7 @@ def run_script(
     mounts: list | None = None,
     labels: dict | None = None,
     owner: str | None = None,
+    netns: str | None = None,
 ) -> dict:
     """在 overlayfs 沙箱里跑一段代码或一条命令（带 Phoenix trace 埋点）。
 
@@ -504,6 +512,7 @@ def run_script(
             mounts=mounts,
             labels=labels,
             owner=owner,
+            netns=netns,
         )
         proc = spawn(prepared)
         result = wait_run(prepared, proc)
