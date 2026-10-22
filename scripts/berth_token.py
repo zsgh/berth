@@ -39,7 +39,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="berth 访问令牌管理")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_create = sub.add_parser("create", help="签发新令牌")
+    p_create = sub.add_parser("create", aliases=["sign"], help="签发新令牌")
     p_create.add_argument("--name", required=True, help="令牌名（审计里显示）")
     p_create.add_argument(
         "--project",
@@ -72,7 +72,7 @@ def main() -> int:
 
     init_db()
 
-    if args.cmd == "create":
+    if args.cmd in ("create", "sign"):
         from sandbox.tokens import create_token
 
         scope = None
