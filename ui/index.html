@@ -39,6 +39,7 @@
       <a href="#/images" :class="{active: route.section === 'images'}">镜像</a>
       <a href="#/templates" :class="{active: route.section === 'templates'}">模板</a>
       <a href="#/events" :class="{active: route.section === 'events'}">操作记录</a>
+      <a href="#/users" :class="{active: route.section === 'users'}" x-show="isAdmin">user</a>
       <a href="#/tokens" :class="{active: route.section === 'tokens'}" x-show="isAdmin">访问令牌</a>
     </nav>
     <div class="sidebar-foot">
@@ -410,10 +411,11 @@
         <div class="card" x-show="tokens.createOpen">
           <h3>签发令牌</h3>
           <div class="form-grid">
-            <label>名字<input name="tokenName" x-model="tokens.form.name" placeholder="shakedown-shop"></label>
-            <label>作用域项目（留空 = 能操作所有服务/执行）<input name="tokenProject" x-model="tokens.form.project" placeholder="shop"></label>
+            <label>名字<input name="tokenName" x-model="tokens.form.name" placeholder="w-1"></label>
+            <label>归属 user（租户/项目）<input name="tokenUser" x-model="tokens.form.user" placeholder="shop"></label>
+            <label>有效期（秒，0 = 不过期）<input type="number" name="tokenTtl" x-model.number="tokens.form.ttl" min="0"></label>
           </div>
-          <p class="muted small">作用域按<strong>标签</strong>限定：这个令牌只能看到 / 操作带该标签的服务、执行和产物。造镜像、签发令牌这类宿主级操作只有 admin 能做。</p>
+          <p class="muted small">令牌绑定一个 <strong>user</strong>：只能看到 / 操作这个 user 的资源；全局共享资源（owner 为空）可见但只读。造镜像、管 user、签发令牌这类宿主级操作只有超级管理员能做。</p>
           <div class="actions">
             <button class="primary" @click="tokens.create()">签发</button>
             <button class="ghost" @click="tokens.createOpen = false">取消</button>
@@ -427,13 +429,14 @@
         </div>
 
         <table class="table" x-show="tokens.rows.length">
-          <thead><tr><th>id</th><th>名字</th><th>作用域</th><th>最近使用</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>id</th><th>名字</th><th>user</th><th>到期</th><th>最近使用</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
           <tbody>
             <template x-for="t in tokens.rows" :key="t.id">
               <tr>
                 <td class="mono small" x-text="t.id"></td>
                 <td x-text="t.name"></td>
-                <td class="small mono" x-text="JSON.stringify(t.scope || {}) || '（全量数据）'"></td>
+                <td class="mono small" x-text="t.user || '—'"></td>
+                <td class="small mono" x-text="t.expires_at || '永不过期'"></td>
                 <td class="small mono" x-text="t.last_used_at || '—'"></td>
                 <td class="small mono" x-text="t.created_at"></td>
                 <td><span class="badge" :class="t.revoked_at ? 'crashed' : 'running'" x-text="t.revoked_at ? '已吊销' : '有效'"></span></td>
@@ -443,6 +446,47 @@
           </tbody>
         </table>
         <div class="card muted" x-show="!tokens.rows.length">还没有令牌。</div>
+      </section>
+
+      <!-- ── user（租户/项目） ── -->
+      <section x-show="route.name === 'users'">
+        <div class="head-row">
+          <h2>user（租户/项目）</h2>
+          <div class="spacer"></div>
+          <button class="ghost" @click="users.load()">刷新</button>
+          <button class="primary" @click="users.createOpen = true">新建 user</button>
+        </div>
+
+        <div class="card" x-show="users.createOpen">
+          <h3>新建 user</h3>
+          <div class="form-grid">
+            <label>名字<input name="newUserName" x-model="users.form.name" placeholder="acme"></label>
+            <label>并发任务上限（0 = 不限）<input type="number" name="newUserQuotaRuns" x-model.number="users.form.quota_runs" min="0"></label>
+            <label>服务数上限（0 = 不限）<input type="number" name="newUserQuotaServices" x-model.number="users.form.quota_services" min="0"></label>
+          </div>
+          <div class="actions">
+            <button class="primary" @click="users.create()">创建</button>
+            <button class="ghost" @click="users.createOpen = false">取消</button>
+          </div>
+        </div>
+
+        <table class="table" x-show="users.rows.length">
+          <thead><tr><th>名字</th><th>id</th><th>服务</th><th>执行</th><th>配额(任务/服务)</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <template x-for="u in users.rows" :key="u.id">
+              <tr>
+                <td class="mono" x-text="u.name"></td>
+                <td class="mono small" x-text="u.id"></td>
+                <td x-text="u.resources?.services ?? 0"></td>
+                <td x-text="u.resources?.runs ?? 0"></td>
+                <td class="small" x-text="(u.quota_runs || '∞') + ' / ' + (u.quota_services || '∞')"></td>
+                <td class="small mono" x-text="u.created_at"></td>
+                <td><button class="ghost sm" @click="users.remove(u)">删除</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!users.rows.length">还没有 user。</div>
       </section>
 
       <!-- ── 镜像 ── -->

@@ -104,7 +104,14 @@ class RunRequest(BaseModel):
     mounts: list[MountSpec] | None = Field(
         None, description="只读挂载宿主目录（白名单内）"
     )
-    labels: dict[str, str] | None = Field(None, description="标签（project=foo 等）")
+    labels: dict[str, str] | None = Field(
+        None, description="标签（只是元数据：分组/检索，不参与授权判定）"
+    )
+    owner: str | None = Field(
+        None,
+        description="归属的 user（默认取令牌所属的 user；超级管理员可指定，"
+        "留空 = 全局共享资源）",
+    )
 
     @field_validator("network", mode="before")
     @classmethod
@@ -124,13 +131,11 @@ class RunRequest(BaseModel):
 
 
 class TokenRequest(BaseModel):
-    """POST /tokens 请求体：签发访问令牌。"""
+    """POST /tokens 请求体：签发访问令牌（绑定一个 user）。"""
 
     name: str = Field(..., description="令牌名（审计里显示）")
-    scope: dict | None = Field(
-        None,
-        description='作用域，如 {"labels": {"project": "shop"}}；不给 = 全权（admin）',
-    )
+    user: str = Field(..., description="令牌归属的 user（租户/项目）；不存在会自动建")
+    ttl: int = Field(0, ge=0, le=31536000, description="有效期（秒），0 = 永不过期")
 
 
 class BootstrapRequest(BaseModel):
@@ -138,10 +143,18 @@ class BootstrapRequest(BaseModel):
 
     code: str = Field(..., description="引导码（berth 启动时生成，写在本地文件里）")
     name: str = Field(..., description="令牌名（审计里显示）")
-    scope: dict | None = Field(
-        None,
-        description='作用域，如 {"labels": {"project": "shop"}}；不给 = 能操作所有服务/执行',
-    )
+    user: str = Field(..., description="令牌归属的 user（不存在会自动建）")
+    ttl: int = Field(0, ge=0, le=31536000, description="有效期（秒），0 = 永不过期")
+
+
+class UserRequest(BaseModel):
+    """POST /users 请求体：建一个 user（租户/项目）。"""
+
+    name: str = Field(..., description="user 名（业务标识，如 acme / shop）")
+    notes: str | None = Field(None, description="备注")
+    quota_runs: int = Field(0, ge=0, description="并发任务数上限，0 = 不限")
+    quota_memory_mb: int = Field(0, ge=0, description="内存上限（MB），0 = 不限")
+    quota_services: int = Field(0, ge=0, description="服务数上限，0 = 不限")
 
 
 class ImageBuildRequest(BaseModel):
@@ -170,7 +183,14 @@ class EnsureRequest(BaseModel):
     init: InitSpec | dict[str, Any] | None = Field(
         None, description="健康检查通过后执行的初始化（SQL / 脚本 / workspace 文件）"
     )
-    labels: dict[str, str] | None = Field(None, description="标签（project=foo 等）")
+    labels: dict[str, str] | None = Field(
+        None, description="标签（只是元数据：分组/检索，不参与授权判定）"
+    )
+    owner: str | None = Field(
+        None,
+        description="归属的 user（默认取令牌所属的 user；超级管理员可指定，"
+        "留空 = 全局共享资源）",
+    )
     task_id: str | None = Field(
         None, description="关联的任务；服务 workspace 与该任务共享（可读 init.file）"
     )

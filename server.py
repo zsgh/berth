@@ -56,14 +56,15 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import (
-    _has_db_tokens,
+    _has_db_tokens as _any_db_token,
     actor_of,
     can_touch,
     forbid_out_of_scope,
-    forbid_shared_create,
+    owner_for,
     principal_of,
     require_admin,
     require_auth,
+    require_self_or_admin,
     scoped_labels,
 )
 from api.schemas import (
@@ -72,6 +73,7 @@ from api.schemas import (
     ImageBuildRequest,
     RunRequest,
     TokenRequest,
+    UserRequest,
 )
 from sandbox import config
 from sandbox.files import (
@@ -289,8 +291,9 @@ def scripts_run(req: RunRequest, request: Request) -> dict:
         tasks_max=req.processes or config.max_processes(),
         network=req.network_policy().to_dict(),
         mounts=[m.model_dump() for m in (req.mounts or [])],
-        # 创建时强制打上作用域标签（scoped token 不能建到别的项目去）
+        # 标签只是元数据；归属 owner 由令牌决定
         labels=scoped_labels(request, req.labels),
+        owner=owner_for(request, req.owner),
     )
     try:
         if req.async_:
@@ -324,7 +327,7 @@ def scripts_list(
     )
     principal = principal_of(request)
     if not principal.admin:
-        runs = [r for r in runs if can_touch(request, r.get("labels"))]
+        runs = [r for r in runs if can_touch(request, r.get("owner"))]
     next_cursor = runs[-1]["created_at"] if runs and len(runs) == limit else None
     return {"runs": runs, "count": len(runs), "next_cursor": next_cursor}
 
@@ -334,7 +337,7 @@ def _run_or_404(request: Request, task_id: str) -> dict:
     record = get_run(task_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"no run for task_id={task_id}")
-    forbid_out_of_scope(request, record.get("labels"), "执行")
+    forbid_out_of_scope(request, record.get("owner"), "执行")
     return record
 
 
@@ -347,7 +350,7 @@ def _task_scope_check(request: Request, task_id: str) -> dict | None:
     record = get_run(task_id)
     if record is None:
         return None
-    forbid_out_of_scope(request, record.get("labels"), "执行")
+    forbid_out_of_scope(request, record.get("owner"), "执行")
     return record
 
 
@@ -368,7 +371,8 @@ def _claim_task(request: Request, task_id: str) -> dict:
             "duration": 0,
             "artifacts": [],
             "status": "pending",
-            "labels": scoped_labels(request, None),
+            "labels": {},
+            "owner": owner_for(request, None),
         },
     )
     return get_run(task_id) or {}
@@ -385,7 +389,7 @@ def scripts_get(request: Request, task_id: str, offset: int = Query(0, ge=0, des
     record = runs_mod.run_status(task_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"no run for task_id={task_id}")
-    forbid_out_of_scope(request, record.get("labels"), "执行")
+    forbid_out_of_scope(request, record.get("owner"), "执行")
     if offset:
         stdout = record.get("stdout") or ""
         record["stdout"] = stdout[int(offset):]
@@ -581,7 +585,7 @@ def _service_or_404(request: Request, ref: str, modify: bool = False) -> dict:
     row = resolve_ref(ref)
     if row is None:
         raise HTTPException(status_code=404, detail=f"no such service: {ref}")
-    forbid_out_of_scope(request, row.get("labels"), "服务", modify=modify)
+    forbid_out_of_scope(request, row.get("owner"), "服务", modify=modify)
     return row
 
 
@@ -597,21 +601,28 @@ def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
 
     existing = resolve_ref(ref)
     if existing is not None:
-        forbid_out_of_scope(request, existing.get("labels"), "服务", modify=True)
+        forbid_out_of_scope(request, existing.get("owner"), "服务", modify=True)
     if not req.template and not req.spec:
         if existing is None:
             raise HTTPException(
                 status_code=400, detail="必须给 template（模板名）或 spec（内联模板）"
             )
         # 已存在 + 只给了 labels → 只更新标签（比如把服务标成共享）
-        if req.labels:
-            forbid_shared_create(request, req.labels)
-            from state.db import update_service
+        from state.db import update_service
 
+        fields = {}
+        if req.labels:
             new_labels = {**(existing.get("labels") or {}), **scoped_labels(request, req.labels)}
-            update_service(existing["service_id"], labels=json.dumps(new_labels, ensure_ascii=False))
+            fields["labels"] = json.dumps(new_labels, ensure_ascii=False)
+        if req.owner is not None:
+            if not principal_of(request).admin:
+                raise HTTPException(
+                    status_code=403, detail="只有超级管理员能改资源的归属（owner）"
+                )
+            fields["owner"] = owner_for(request, req.owner)
+        if fields:
+            update_service(existing["service_id"], **fields)
         return get_service(existing["service_id"])
-    forbid_shared_create(request, req.labels)
     try:
         return start_service(
             req.template or "",
@@ -619,8 +630,9 @@ def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
             spec=req.spec,
             overrides=req.overrides_dict(),
             init=req.init_spec().model_dump(exclude_none=True),
-            # 创建时强制打上作用域标签
+            # 标签只是元数据；归属 owner 由令牌决定
             labels=scoped_labels(request, req.labels),
+            owner=owner_for(request, req.owner),
             task_id=req.task_id,
         )
     except ServiceConflictError as e:
@@ -653,7 +665,7 @@ def services_list(
     )
     principal = principal_of(request)
     if not principal.admin:
-        rows = [r for r in rows if can_touch(request, r.get("labels"))]
+        rows = [r for r in rows if can_touch(request, r.get("owner"))]
     return rows
 
 
@@ -662,7 +674,7 @@ def services_get(request: Request, ref: str) -> dict:
     svc = get_service(ref)
     if not svc:
         raise HTTPException(status_code=404, detail=f"no such service: {ref}")
-    forbid_out_of_scope(request, svc.get("labels"), "服务")
+    forbid_out_of_scope(request, svc.get("owner"), "服务")
     return svc
 
 
@@ -750,24 +762,24 @@ def volumes_list(request: Request) -> list[dict]:
     rows = list_volumes()
     principal = principal_of(request)
     if not principal.admin:
-        rows = [v for v in rows if can_touch(request, _service_labels_of(v.get("service_id")))]
+        rows = [v for v in rows if can_touch(request, _service_owner_of(v.get("service_id")))]
     return rows
 
 
-def _service_labels_of(service_id: str | None) -> dict:
-    """某个服务（按 service_id）的 labels —— 数据卷归属判定用。"""
+def _service_owner_of(service_id: str | None) -> str | None:
+    """某个服务（按 service_id）的归属 user —— 数据卷归属判定用。"""
     if not service_id:
-        return {}
+        return None
     from state.db import get_service_row
 
     row = get_service_row(service_id)
-    return (row or {}).get("labels") or {}
+    return (row or {}).get("owner")
 
 
 @api.delete("/volumes/{service_id}")
 def volumes_delete(request: Request, service_id: str) -> dict:
     """清理**孤儿**卷（记录已删但卷还在磁盘上）。非孤儿卷返回 409。"""
-    forbid_out_of_scope(request, _service_labels_of(service_id), "卷", modify=True)
+    forbid_out_of_scope(request, _service_owner_of(service_id), "卷", modify=True)
     try:
         return delete_volume(service_id)
     except ValueError as e:
@@ -800,7 +812,7 @@ def system_info(request: Request) -> dict:
         "templates": list_templates(),
         "network": network_capabilities(),
         "auth": {
-            "enabled": bool(config.token()) or bool(_has_db_tokens()),
+            "enabled": bool(config.env_tokens() or config.file_token()) or _any_db_token(),
             "scheme": "Bearer",
         },
         "principal": principal_of(request).to_dict(),
@@ -1037,11 +1049,11 @@ def events_list(
 
 @public_api.post("/tokens/bootstrap", status_code=201)
 def tokens_bootstrap(req: BootstrapRequest, request: Request) -> dict:
-    """用一次性引导码换一个**受限**令牌（不需要先有 admin 凭证）。
+    """用一次性引导码换一个令牌（**不需要先有凭证**）。
 
     引导码在 `BERTH_TOKEN_FILE` 同目录的 `bootstrap.code`（0600），
     由 berth 启动时生成，30 分钟内有效、只能用一次。
-    签出来的令牌**不是 admin**，也**不能**再签发令牌 —— 只能管自己作用域内的资源。
+    换来的令牌绑定一个 **user**（不存在会自动建）—— 只能管这个 user 的资源。
     """
     from sandbox.tokens import (
         bootstrap_locked,
@@ -1057,17 +1069,17 @@ def tokens_bootstrap(req: BootstrapRequest, request: Request) -> dict:
         note_bootstrap_fail(client)
         raise HTTPException(status_code=401, detail="引导码无效或已过期")
     try:
-        record, raw = create_token(req.name, req.scope)
+        record, raw = create_token(req.name, req.user, req.ttl)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     record_event(
         "POST /tokens/bootstrap",
         target=record["id"],
-        actor="bootstrap",
+        actor=f"user:{record['user']}",
         method="POST",
         path=request.url.path,
         status=201,
-        detail={"name": record["name"], "scope": record["scope"]},
+        detail={"name": record["name"], "user": record["user"], "ttl": req.ttl},
     )
     return {**record, "token": raw, "note": "token 明文只显示这一次，请立刻保存"}
 
@@ -1083,17 +1095,16 @@ def tokens_list(request: Request) -> list[dict]:
 
 @api.post("/tokens", status_code=201)
 def tokens_create(request: Request, req: TokenRequest) -> dict:
-    """签发一个访问令牌。
+    """签发一个访问令牌（绑定一个 user）。
 
     **明文 token 只在这里返回一次**（库里只存 sha256）—— 丢了就重新签发一个。
-    scope 形如 `{"labels": {"project": "shop"}}`：这个 token 只能看到 / 操作
-    带 project=shop 标签的服务、执行、产物。
+    `user` 不存在会自动创建；`ttl` 秒后自动失效（动态 worker 场景用）。
     """
     require_admin(request)
     from sandbox.tokens import create_token
 
     try:
-        record, raw = create_token(req.name, req.scope)
+        record, raw = create_token(req.name, req.user, req.ttl)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {**record, "token": raw, "note": "token 明文只显示这一次，请立刻保存"}
@@ -1109,6 +1120,117 @@ def tokens_revoke(request: Request, token_id: str) -> dict:
     if not record:
         raise HTTPException(status_code=404, detail=f"没有这个令牌: {token_id}")
     return {**record, "revoked": True}
+
+
+# ─────────────────────────── users（租户/项目） ───────────────────────────
+
+
+@api.get("/users")
+def users_list(request: Request) -> list[dict]:
+    """列出所有 user（超级管理员）。"""
+    require_admin(request)
+    from state.db import list_users, user_resource_counts
+
+    out = []
+    for u in list_users():
+        row = dict(u)
+        row["resources"] = user_resource_counts(u["name"])
+        out.append(row)
+    return out
+
+
+@api.post("/users", status_code=201)
+def users_create(request: Request, req: UserRequest) -> dict:
+    """建一个 user（超级管理员）。令牌引用不存在的 user 时也会自动建。"""
+    require_admin(request)
+    from state.db import ensure_user, update_user
+
+    try:
+        row = ensure_user(req.name, req.notes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    quotas = {
+        "quota_runs": req.quota_runs,
+        "quota_memory_mb": req.quota_memory_mb,
+        "quota_services": req.quota_services,
+    }
+    if any(quotas.values()):
+        row = update_user(req.name, **quotas) or row
+    return row
+
+
+@api.get("/users/{name}")
+def users_get(request: Request, name: str) -> dict:
+    """user 详情（本人或超级管理员）。"""
+    require_self_or_admin(request, name)
+    from state.db import get_user, user_resource_counts
+
+    row = get_user(name)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"没有这个 user: {name}")
+    row["resources"] = user_resource_counts(name)
+    return row
+
+
+@api.patch("/users/{name}")
+def users_update(request: Request, name: str, body: dict) -> dict:
+    """改 user 的配额（超级管理员）。"""
+    require_admin(request)
+    from state.db import update_user
+
+    row = update_user(name, **(body or {}))
+    if not row:
+        raise HTTPException(status_code=404, detail=f"没有这个 user: {name}")
+    return row
+
+
+@api.delete("/users/{name}")
+def users_delete(request: Request, name: str) -> dict:
+    """删 user（超级管理员）。
+
+    只删 user 记录本身；它名下的服务/执行**不会**被自动删（要自己清），
+    免得误删一整套环境。
+    """
+    require_admin(request)
+    from state.db import delete_user, user_resource_counts
+
+    counts = user_resource_counts(name)
+    row = delete_user(name)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"没有这个 user: {name}")
+    return {**row, "deleted": True, "resources_left": counts}
+
+
+@api.get("/users/{name}/resources")
+def users_resources(request: Request, name: str) -> dict:
+    """某个 user 名下的资源汇总。"""
+    require_self_or_admin(request, name)
+    from state.db import list_run_rows, list_service_rows
+
+    services = [r for r in list_service_rows() if (r.get("owner") or "") == name]
+    runs = [r for r in list_run_rows() if (r.get("owner") or "") == name]
+    return {
+        "user": name,
+        "services": [
+            {
+                "service_id": s["service_id"],
+                "name": s.get("name"),
+                "template": s.get("template"),
+                "status": s.get("status"),
+                "port": s.get("port"),
+            }
+            for s in services
+        ],
+        "runs": [
+            {
+                "task_id": r["task_id"],
+                "status": r.get("status"),
+                "image": r.get("image"),
+                "created_at": r.get("created_at"),
+            }
+            for r in runs
+        ],
+    }
 
 
 # ─────────────────────────── 挂载 ───────────────────────────

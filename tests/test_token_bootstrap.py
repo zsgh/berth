@@ -64,20 +64,22 @@ def main():
     cpath2, code2 = ensure_bootstrap_code()
     with TestClient(server.app) as client:
         # 错码 → 401
-        r = client.post("/tokens/bootstrap", json={"code": "BADCODE1", "name": "x"})
+        r = client.post(
+            "/tokens/bootstrap", json={"code": "BADCODE1", "name": "x", "user": "acme"}
+        )
         assert r.status_code == 401, r.text
         print("✔ 错码 → 401")
 
         # 对码 → 拿到 token（scoped）
         r = client.post(
             "/tokens/bootstrap",
-            json={"code": code2, "name": "shakedown", "scope": {"labels": {"project": "shop"}}},
+            json={"code": code2, "name": "shakedown", "user": "shop", "ttl": 3600},
         )
         assert r.status_code == 201, r.text
         data = r.json()
-        print("   id:", data["id"], "| scope:", data["scope"])
+        print("   id:", data["id"], "| user:", data["user"], "| ttl:", data["ttl"])
         assert data["token"].startswith("bt_")
-        assert data["scope"] == {"labels": {"project": "shop"}}
+        assert data["user"] == "shop", data
         new_token = data["token"]
 
         # 换来的 token 能用，但只是受限身份
@@ -87,17 +89,20 @@ def main():
         print("   principal:", principal)
         assert principal["admin"] is False
         assert principal["name"] == "shakedown"
+        assert principal["user"] == "shop"
         print("✔ 换来的 token 可用，且不是 admin")
 
         # 再用同一个码 → 不行
-        r = client.post("/tokens/bootstrap", json={"code": code2, "name": "y"})
+        r = client.post("/tokens/bootstrap", json={"code": code2, "name": "y", "user": "acme"})
         assert r.status_code == 401, r.text
         print("✔ 码不能重复用")
 
         # 限流：连续错码会被锁
         codes = []
         for _ in range(6):
-            rr = client.post("/tokens/bootstrap", json={"code": "NOPE1234", "name": "z"})
+            rr = client.post(
+                "/tokens/bootstrap", json={"code": "NOPE1234", "name": "z", "user": "acme"}
+            )
             codes.append(rr.status_code)
         print("   连续错码:", codes)
         assert 429 in codes, codes

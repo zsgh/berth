@@ -434,6 +434,7 @@ def start_service(
     labels: dict | None = None,
     task_id: str | None = None,
     network: dict | None = None,
+    owner: str | None = None,
 ) -> dict:
     """启动服务。**同名幂等（ensure 语义）**，当传入 name 时：
 
@@ -484,6 +485,7 @@ def start_service(
             labels=labels,
             task_id=task_id,
             overrides=overrides,
+            owner=owner,
         )
         s.set_attribute("service_id", svc["service_id"])
         s.set_attribute("port", svc["port"])
@@ -531,6 +533,7 @@ def _start_service_impl(
     overrides: dict | None = None,
     init_result: dict | None = None,
     replay_init: bool = True,
+    owner: str | None = None,
 ) -> dict:
     """service_id/svc_dir 传入时表示「复用已有服务」：保留数据卷，端口重新分配（优先原端口）。"""
     if spec is None:
@@ -625,6 +628,7 @@ def _start_service_impl(
             init_result=json.dumps(init_result or {}, ensure_ascii=False),
             network=json.dumps(network, ensure_ascii=False),
             task_id=task_id,
+            owner=owner,
             **(dict(created_at=created_at) if created_at else {}),
         )
 
@@ -1035,6 +1039,7 @@ def start_existing_service(ref: str, timeout: float | None = None) -> dict:
             init=_load_stored_init(row),
             labels=row.get("labels") or {},
             task_id=row.get("task_id"),
+            owner=row.get("owner"),
         )
         s.set_attribute("service_id", svc["service_id"])
         s.set_attribute("port", svc["port"])

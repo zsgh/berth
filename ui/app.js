@@ -452,13 +452,13 @@ function shell() {
 
     tokens: {
       rows: [], createOpen: false, created: '',
-      form: { name: '', project: '' },
+      form: { name: '', user: '', ttl: 3600 },
       async load() { this.rows = await api('/tokens'); },
       async create() {
         const f = this.form;
         if (!f.name.trim()) return say('请填令牌名', 'err');
-        const body = { name: f.name.trim() };
-        if (f.project.trim()) body.scope = { labels: { project: f.project.trim() } };
+        if (!f.user.trim()) return say('请填归属的 user（租户/项目）', 'err');
+        const body = { name: f.name.trim(), user: f.user.trim(), ttl: Number(f.ttl) || 0 };
         try {
           const r = await api('/tokens', { method: 'POST', json: body });
           this.created = r.token;
@@ -477,6 +477,42 @@ function shell() {
         try {
           await api('/tokens/' + encodeURIComponent(t.id), { method: 'DELETE' });
           say('已吊销 ' + t.name);
+        } catch (e) { say(String(e.message || e), 'err'); }
+        await this.load();
+      },
+    },
+
+    users: {
+      rows: [], createOpen: false,
+      form: { name: '', quota_runs: 0, quota_services: 0 },
+      async load() { this.rows = await api('/users'); },
+      async create() {
+        const f = this.form;
+        if (!f.name.trim()) return say('请填 user 名', 'err');
+        try {
+          await api('/users', {
+            method: 'POST',
+            json: {
+              name: f.name.trim(),
+              quota_runs: Number(f.quota_runs) || 0,
+              quota_services: Number(f.quota_services) || 0,
+            },
+          });
+          say('已创建 user：' + f.name);
+          this.createOpen = false;
+          await this.load();
+        } catch (e) { say(String(e.message || e), 'err'); }
+      },
+      async remove(u) {
+        const ok = await askConfirm({
+          title: '删除 user ' + u.name,
+          message: '只删 user 记录；它名下的服务/执行不会被自动删（要自己清）。',
+          name: u.name, okText: '删除',
+        });
+        if (!ok) return;
+        try {
+          await api('/users/' + encodeURIComponent(u.name), { method: 'DELETE' });
+          say('已删除 user ' + u.name);
         } catch (e) { say(String(e.message || e), 'err'); }
         await this.load();
       },
@@ -668,6 +704,8 @@ function shell() {
           await this.events.load();
         } else if (name === 'tokens') {
           await this.tokens.load();
+        } else if (name === 'users') {
+          await this.users.load();
         }
       } catch (e) {
         this.say(String(e.message || e), 'err');
@@ -695,6 +733,8 @@ function shell() {
           p(() => this.images.load());
         } else if (name === 'tokens') {
           p(() => this.tokens.load());
+        } else if (name === 'users') {
+          p(() => this.users.load());
         }
       }, POLL_MS);
     },

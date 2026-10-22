@@ -42,6 +42,7 @@ def start_async(
     network: dict | None = None,
     mounts: list | None = None,
     labels: dict | None = None,
+    owner: str | None = None,
 ) -> dict:
     """启动一次异步执行，立刻返回（不阻塞）。"""
     task_id = str(task_id) if task_id else f"auto-{uuid.uuid4().hex[:12]}"
@@ -58,6 +59,7 @@ def start_async(
         network=network,
         mounts=mounts,
         labels=labels,
+        owner=owner,
         output_dir=_output_dir(task_id, "pending"),
     )
     return _launch(prepared)
@@ -107,6 +109,7 @@ def _launch(prepared: PreparedRun) -> dict:
             "image": prepared.image,
             "network": prepared.network,
             "labels": prepared.labels,
+            "owner": prepared.owner,
             "timeout": prepared.timeout,
             "started_at": prepared.started_at,
         },

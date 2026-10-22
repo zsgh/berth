@@ -44,9 +44,63 @@ def token_file() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+def config_file() -> Path | None:
+    """只读配置文件路径（BERTH_CONFIG_FILE）。
+
+    平台侧可以把长期凭证放这里（600 root），不用塞进环境变量。
+    格式：KEY=VALUE 一行一个，# 开头是注释。
+    """
+    raw = (os.environ.get("BERTH_CONFIG_FILE") or "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+_file_cache: dict = {}
+
+
+def file_settings() -> dict:
+    """读配置文件里的配置（按 mtime 缓存，变了就重读）。"""
+    path = config_file()
+    if path is None:
+        return {}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _file_cache.get("mtime") == mtime:
+        return _file_cache.get("data", {})
+    out: dict = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            out[key.strip()] = value
+    except OSError:
+        return {}
+    _file_cache.clear()
+    _file_cache["mtime"] = mtime
+    _file_cache["data"] = out
+    return out
+
+
+def setting(name: str, default=None):
+    """取配置值：环境变量优先，其次只读配置文件。"""
+    value = os.environ.get(name)
+    if value is not None and value != "":
+        return value
+    return file_settings().get(name, default)
+
+
 def env_tokens() -> list[str]:
-    """`BERTH_TOKEN` 里的 token（可逗号分隔多个 → 零停机轮换）。"""
-    raw = os.environ.get("BERTH_TOKEN") or ""
+    """`BERTH_TOKEN` 里的 token（可逗号分隔多个 → 零停机轮换）。
+
+    环境变量和只读配置文件里的都会认。
+    """
+    raw = os.environ.get("BERTH_TOKEN") or file_settings().get("BERTH_TOKEN") or ""
     return [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
 
 

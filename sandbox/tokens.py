@@ -1,22 +1,21 @@
-"""API token：解析、作用域、主语（principal）。
+"""API token：身份（user）+ 有效期，取代旧版的"标签域 scope"。
 
 模型（单租户自托管，别搞 OAuth）：
-- **静态 token**：永不过期；泄露了手动换（支持同时挂多个 → 零停机轮换）
-- **可选作用域**：按**标签**限定能碰哪些资源（复用 B12 的 labels 机制）
+- **静态 token**：默认不过期；泄露了手动换（`BERTH_TOKEN` 可挂多个 → 零停机轮换）
+- **身份**：令牌绑定一个 **user**（= 租户/项目/团队）。授权判定 = **owner 相等**，
+  不再靠标签匹配（标签拼错/多标签歧义/同名即同域都会出问题）
+- **有效期**：可选 ttl（秒）→ 到期自动失效（动态 worker 场景必需）
 - **哈希存储**：库里只存 sha256，明文只在创建时返回一次（跟密码一样）
 
-两种来源：
-1. 环境变量 `BERTH_TOKEN`（可逗号分隔多个）→ **admin**（全权）
-2. SQLite 的 `berth_tokens` 表 → 通常带作用域
+两种身份：
+| 来源 | 身份 | 能做什么 |
+|---|---|---|
+| `BERTH_TOKEN`（环境变量 / 只读配置文件，可逗号分隔多个） | **超级管理员**（独一份） | 跨 user + 宿主级操作（造/删镜像、管 user、签发令牌） |
+| `berth_tokens` 表签发 | 某个 **user** | 只能看到/操作自己 user 的资源 + 全局共享资源（只读） |
 
-作用域语义（标签域）：
-- 作用域 `{"project": "shop"}` 的 token：
-  - 只能看到 / 操作 **labels 包含 project=shop** 的服务、执行、产物
-  - 创建资源时**强制打上**作用域标签（不能创建到别的项目去）
-  - 看不到作用域外的资源 → 表现为 404（不泄露存在性）
-- admin：不受限
-
-不属于作用域的资源（老记录没标签的）对 scoped token **不可见**（默认拒绝）。
+资源归属：
+- `owner = <user 名>` → 该 user 私有
+- `owner IS NULL` → **全局共享资源**（比如公共 mysql/redis）：所有 user 可见，**只读**
 """
 from __future__ import annotations
 
@@ -34,6 +33,7 @@ from sandbox import config
 
 log = logging.getLogger(__name__)
 
+
 # ─────────────────────────── 主语 ───────────────────────────
 
 
@@ -44,8 +44,9 @@ class Principal:
     admin: bool
     name: str = "anonymous"
     token_id: str | None = None
-    scope: dict = field(default_factory=dict)  # {"labels": {...}}
-    source: str = "none"                       # env / db
+    user: str | None = None        # 归属的 user（非 admin 令牌）
+    scope: dict = field(default_factory=dict)   # 旧字段，保留兼容读取
+    source: str = "none"           # env / file / db
 
     @property
     def actor(self) -> str:
@@ -54,12 +55,15 @@ class Principal:
             return "admin:env"
         if self.admin and self.source == "file":
             return "admin:local"
+        if self.user:
+            return f"user:{self.user}"
         if self.token_id:
             return f"token:{self.token_id[:12]}"
         return "anonymous"
 
     @property
     def scope_labels(self) -> dict:
+        """旧接口兼容：标签域（不再用于授权判定）。"""
         return dict((self.scope or {}).get("labels") or {})
 
     def to_dict(self) -> dict:
@@ -67,12 +71,10 @@ class Principal:
             "admin": self.admin,
             "name": self.name,
             "token_id": self.token_id,
+            "user": self.user,
             "scope": self.scope,
             "actor": self.actor,
         }
-
-
-ADMIN = Principal(admin=True, name="admin", source="env")
 
 
 def hash_token(raw: str) -> str:
@@ -84,12 +86,12 @@ def hash_token(raw: str) -> str:
 
 
 def resolve_token(raw: str | None) -> Principal | None:
-    """把明文 token 解析成 Principal；无效返回 None。"""
+    """把明文 token 解析成 Principal；无效/过期/已撤销 → None。"""
     if not raw:
         return None
     raw = raw.strip()
 
-    # 1) 环境变量里的 admin token（可逗号分隔多个 → 轮换时同时挂两个）
+    # 1) 超级管理员令牌（环境变量，可逗号分隔多个 → 轮换时同时挂新旧）
     for candidate in config.env_tokens():
         if secrets.compare_digest(candidate, raw):
             return Principal(admin=True, name="admin", source="env")
@@ -99,7 +101,7 @@ def resolve_token(raw: str | None) -> Principal | None:
     if from_file and secrets.compare_digest(from_file, raw):
         return Principal(admin=True, name="local", source="file")
 
-    # 2) 库里的 token（可能带作用域）
+    # 2) 库里的令牌（绑定 user）
     from state.db import get_token_by_hash, touch_token
 
     row = get_token_by_hash(hash_token(raw))
@@ -107,106 +109,105 @@ def resolve_token(raw: str | None) -> Principal | None:
         return None
     if row.get("revoked_at"):
         return None
+    expires_at = row.get("expires_at")
+    if expires_at and str(expires_at) <= _now():
+        return None
     touch_token(row["id"])
-    scope = row.get("scope") or {}
-    if isinstance(scope, str):
-        try:
-            scope = json.loads(scope)
-        except (TypeError, json.JSONDecodeError):
-            scope = {}
+
+    user = row.get("user")
+    if not user:
+        # 没有归属 user 的库令牌（理论上迁移时已作废）→ 不给权限
+        return None
     return Principal(
-        # 库里签发的 token 一律**不是 admin**：
-        # - admin（造/删镜像、签发令牌）只属于环境变量里的控制面凭证
-        # - 没给 scope 的 token = 能看能改所有服务/执行（"工作令牌"），但碰不到宿主级操作
         admin=False,
-        name=row.get("name") or "token",
+        name=row.get("name") or str(user),
         token_id=row.get("id"),
-        scope=scope,
+        user=str(user),
         source="db",
     )
 
 
-# ─────────────────────────── 作用域判定 ───────────────────────────
+# ─────────────────────────── 授权判定 ───────────────────────────
 
 
-SHARED_KEY = "shared"
+def is_shared(owner: str | None) -> bool:
+    """是不是**全局共享资源**（owner IS NULL）。
 
-
-def is_shared(labels: dict | None) -> bool:
-    """是不是「共享资源」（labels 里 shared=true）。
-
-    共享资源 = 公共基础设施（比如所有项目共用的 mysql / redis）：
-    - **人人可见**（agent 要能找到它、拿到 host:port 去连）
-    - **只读**（除了 admin，谁都不能停/删/改）
+    公共基础设施（比如所有项目共用的 mysql / redis）：
+    - 所有 user 都能看到（agent 要能找到它、拿 host:port 去连）
+    - **只读**（除了超级管理员，谁都不能停/删/改）
     """
-    return str((labels or {}).get(SHARED_KEY, "")).strip().lower() in ("1", "true", "yes")
+    return owner is None or str(owner) == ""
 
 
-def in_scope(principal: Principal | None, labels: dict | None) -> bool:
-    """**可见性**：这个 principal 能不能看到带这些 labels 的资源。
+def can_view(principal: Principal | None, owner: str | None) -> bool:
+    """可见性。
 
-    - admin：全都能
-    - 共享资源（shared=true）：人人可见（不然 agent 找不到公共的 mysql/redis）
-    - scoped：资源的 labels 必须**包含**作用域要求的全部 k=v
-    - 没标签的老资源：scoped 看不见（默认拒绝）
+    - 超级管理员：全都能看
+    - 全局共享资源（owner IS NULL）：人人可见
+    - 自己的 user 的资源：可见
+    - 别人的：看不见
     """
     if principal is None:
         return False
     if principal.admin:
         return True
-    if is_shared(labels):
+    if is_shared(owner):
         return True
-    want = principal.scope_labels
-    if not want:
-        return True
-    have = labels or {}
-    for key, value in want.items():
-        if str(have.get(key)) != str(value):
-            return False
-    return True
+    return bool(principal.user) and str(owner) == str(principal.user)
 
 
-def can_modify(principal: Principal | None, labels: dict | None) -> bool:
-    """**可修改性**：能不能停 / 删 / 改这个资源。
+def can_modify(principal: Principal | None, owner: str | None) -> bool:
+    """可修改性（停/删/改）。
 
-    - admin：全都能
-    - 共享资源：只读 —— 只有 admin 能动（agent 只该"用"它，不该"管"它）
-    - 其它：同 in_scope
+    - 超级管理员：全都能
+    - 全局共享资源：只读 —— 只有超级管理员能动
+    - 自己的 user 的资源：随便
+    - 别人的：不行
     """
     if principal is None:
         return False
     if principal.admin:
         return True
-    if is_shared(labels):
+    if is_shared(owner):
         return False
-    return in_scope(principal, labels)
+    return bool(principal.user) and str(owner) == str(principal.user)
 
 
-def apply_scope(principal: Principal | None, labels: dict | None) -> dict:
-    """创建资源时：把作用域标签**强制**打上去（scoped token 不能建到别的项目去）。"""
-    out = dict(labels or {})
-    if principal and not principal.admin:
-        out.update(principal.scope_labels)
-    return out
+def owner_for_create(principal: Principal | None, requested: str | None = None) -> str | None:
+    """创建资源时的归属。
+
+    - 超级管理员：可以显式指定 owner；不指定 = 全局共享资源（owner=NULL）
+    - 普通令牌：强制用自己的 user（不能把资源建到别人名下）
+    """
+    if principal is not None and not principal.admin:
+        return principal.user
+    if requested is not None and str(requested).strip():
+        return str(requested).strip()
+    return None
 
 
 # ─────────────────────────── 管理（CRUD） ───────────────────────────
 
 
-def create_token(name: str, scope: dict | None = None) -> tuple[dict, str]:
-    """新建一个 token。返回 (记录, 明文 token) —— **明文只在这里出现一次**。"""
-    from state.db import insert_token
+def create_token(name: str, user: str, ttl: int = 0) -> tuple[dict, str]:
+    """新建一个令牌（绑定 user）。返回 (记录, 明文 token) —— **明文只出现一次**。
 
+    user 不存在会自动建。
+    """
+    from state.db import ensure_user, insert_token
+
+    user = str(user or "").strip()
+    if not user:
+        raise ValueError("令牌必须绑定一个 user（授权靠它）")
+    ensure_user(user)
     raw = "bt_" + secrets.token_urlsafe(32)
-    scope = scope or {}
-    labels = scope.get("labels") or {}
-    if scope and not labels:
-        raise ValueError("scope 目前只支持 {\"labels\": {...}} 形式")
     record = insert_token(
         token_id="tk-" + uuid.uuid4().hex[:10],
         name=str(name or "token"),
         token_hash=hash_token(raw),
-        scope=json.dumps(scope, ensure_ascii=False),
+        user=user,
+        ttl=int(ttl or 0),
     )
     return record, raw
 
@@ -223,10 +224,6 @@ def revoke_token(token_id: str) -> dict | None:
     return revoke_token_row(token_id)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 # ─────────────────────────── 本地令牌文件（A） ───────────────────────────
 
 
@@ -235,8 +232,8 @@ def ensure_token_file() -> tuple[str | None, str | None]:
 
     返回 (路径, token)。没配 `BERTH_TOKEN_FILE` → (None, None)。
 
-    这样同机跑的 agent 直接读这个文件就能拿到 token —— 不用把长期凭证
-    复制到每个地方，也不用改代码。
+    这样同机跑的 agent 直接读这个文件就能拿到超级管理员令牌 —— 不用把长期凭证
+    复制到各个地方，也不用改代码。
     """
     path = config.token_file()
     if path is None:
@@ -270,7 +267,7 @@ def token_file_path() -> str | None:
 
 # ─────────────────────────── 一次性引导码（B） ───────────────────────────
 
-# 引导码失败的限流：{ip: (失败次数, 锁定到的时间戳)}
+# 引导码失败的限流：{client: [失败次数, 锁定到的时间戳]}
 _BOOTSTRAP_FAILS: dict[str, list] = {}
 _BOOTSTRAP_MAX_FAILS = 5
 _BOOTSTRAP_LOCK_SEC = 300
@@ -350,3 +347,7 @@ def consume_bootstrap_code(code: str, client: str = "") -> bool:
         return True
     except OSError:
         return False
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

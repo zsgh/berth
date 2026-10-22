@@ -240,6 +240,7 @@ class PreparedRun:
     network: dict = field(default_factory=dict)
     labels: dict = field(default_factory=dict)
     mounts: list[dict] = field(default_factory=list)
+    owner: str | None = None      # 归属的 user（授权靠它）
     out_path: Path | None = None
     err_path: Path | None = None
     started_at: float = 0.0
@@ -258,6 +259,7 @@ def prepare_run(
     network: dict | None = None,
     mounts: list | None = None,
     labels: dict | None = None,
+    owner: str | None = None,
     output_dir: Path | None = None,
 ) -> PreparedRun:
     """校验参数 + 准备 overlay 目录 + 组装命令（不执行）。"""
@@ -365,6 +367,7 @@ def prepare_run(
         network=policy,
         labels=dict(labels or {}),
         mounts=mount_list,
+        owner=owner,
         out_path=out_path,
         err_path=err_path,
     )
@@ -430,6 +433,7 @@ def wait_run(prepared: PreparedRun, proc: subprocess.Popen, timeout: int | None 
         "status": status,
         "network": prepared.network,
         "labels": prepared.labels,
+        "owner": prepared.owner,
         "timeout": timeout,
         "started_at": prepared.started_at,
     }
@@ -466,6 +470,7 @@ def run_script(
     network: dict | None = None,
     mounts: list | None = None,
     labels: dict | None = None,
+    owner: str | None = None,
 ) -> dict:
     """在 overlayfs 沙箱里跑一段代码或一条命令（带 Phoenix trace 埋点）。
 
@@ -498,6 +503,7 @@ def run_script(
             network=network,
             mounts=mounts,
             labels=labels,
+            owner=owner,
         )
         proc = spawn(prepared)
         result = wait_run(prepared, proc)

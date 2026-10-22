@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def _now() -> str:
 # 老版本 → 新版本补的列（列名 → 列定义）
 MIGRATIONS: dict[str, dict[str, str]] = {
     "runs": {
+        "owner": "TEXT",        # 归属的 user；NULL = 全局共享
         "status": "TEXT DEFAULT 'finished'",   # running/finished/timeout/killed/error
         "image": "TEXT",
         "network": "TEXT",                      # JSON：网络策略
@@ -43,6 +45,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "updated_at": "TEXT",
     },
     "services": {
+        "owner": "TEXT",       # 归属的 user；NULL = 全局共享
         "labels": "TEXT",                       # JSON：标签
         "overrides": "TEXT",                    # JSON：请求里的 overrides
         "spec": "TEXT",                         # JSON：生效的完整模板
@@ -123,10 +126,29 @@ def _create_tables(conn: sqlite3.Connection) -> None:
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
                 token_hash  TEXT NOT NULL UNIQUE,   -- sha256，明文不落库
-                scope       TEXT,                    -- JSON：{"labels": {...}}
+                scope       TEXT,                    -- 旧版残留（0.3.x 的 scope 标签域），已废弃
+                user        TEXT,                    -- 归属的 user（= 租户/项目）
+                ttl         INTEGER DEFAULT 0,       -- 有效期（秒），0 = 永不过期
+                expires_at  TEXT,                    -- 到期时间（算出来的）
                 created_at  TEXT NOT NULL,
                 last_used_at TEXT,
                 revoked_at  TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id               TEXT PRIMARY KEY,
+                name             TEXT NOT NULL UNIQUE,  -- 业务标识（租户/项目/团队）
+                netns            TEXT,                  -- Phase B：网络命名空间名
+                cidr             TEXT,                  -- Phase B：网段
+                uid              INTEGER,               -- Phase C：sandbox uid
+                quota_runs       INTEGER DEFAULT 0,     -- 0 = 不限
+                quota_memory_mb  INTEGER DEFAULT 0,
+                quota_services   INTEGER DEFAULT 0,
+                created_at       TEXT NOT NULL,
+                notes            TEXT
             )
             """
         )
@@ -158,6 +180,57 @@ def _migrate(conn: sqlite3.Connection) -> None:
             for name, decl in cols.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        _migrate_data(conn)
+
+
+def _migrate_data(conn: sqlite3.Connection) -> None:
+    """一次性数据迁移（0.3.x 的"标签域"→ 0.4 的"user 归属"）。
+
+    - 资源：labels.project=X 的 → owner=X（user 不存在就建）；没有 project 的 → owner=NULL（全局共享）
+    - 令牌：老的 scope 令牌**直接作废**（scope 语义不再支持），调用方需重新签发
+    """
+    # 资源归属：从 labels 推导一次
+    for table in ("services", "runs"):
+        try:
+            rows = conn.execute(
+                f"SELECT rowid AS rid, labels FROM {table} WHERE owner IS NULL AND labels IS NOT NULL"
+            ).fetchall()
+        except sqlite3.DatabaseError:  # pragma: no cover
+            continue
+        for row in rows:
+            try:
+                labels = json.loads(row["labels"]) or {}
+            except (TypeError, json.JSONDecodeError):
+                labels = {}
+            owner = labels.get("project")
+            if owner:
+                _ensure_user_row(conn, str(owner))
+            conn.execute(
+                f"UPDATE {table} SET owner=? WHERE rowid=?", (str(owner) if owner else None, row["rid"])
+            )
+
+    # 老令牌作废（scope 语义已废弃）
+    try:
+        conn.execute(
+            "UPDATE berth_tokens SET revoked_at=COALESCE(revoked_at, ?) "
+            "WHERE user IS NULL AND revoked_at IS NULL",
+            (_now(),),
+        )
+    except sqlite3.DatabaseError:  # pragma: no cover
+        pass
+
+
+def _ensure_user_row(conn: sqlite3.Connection, name: str) -> str:
+    """确保有个 user 行（没有就建）。返回 user id。"""
+    name = str(name).strip()
+    row = conn.execute("SELECT id FROM users WHERE name=?", (name,)).fetchone()
+    if row:
+        return row["id"]
+    user_id = "usr-" + uuid.uuid4().hex[:10]
+    conn.execute(
+        "INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)", (user_id, name, _now())
+    )
+    return user_id
 
 
 _SCHEMA_READY = False
@@ -233,8 +306,9 @@ def record_run(task_id: str, code: str, result: dict) -> None:
             """
             INSERT INTO runs (task_id, code, stdout, stderr, exit_code, duration_ms,
                               artifacts, created_at, finished_at,
-                              status, image, network, labels, timeout, started_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              status, image, network, labels, timeout, started_at, updated_at,
+                              owner)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 code=excluded.code, stdout=excluded.stdout, stderr=excluded.stderr,
                 exit_code=excluded.exit_code, duration_ms=excluded.duration_ms,
@@ -242,7 +316,8 @@ def record_run(task_id: str, code: str, result: dict) -> None:
                 finished_at=excluded.finished_at,
                 status=excluded.status, image=excluded.image, network=excluded.network,
                 labels=excluded.labels, timeout=excluded.timeout,
-                started_at=excluded.started_at, updated_at=excluded.updated_at
+                started_at=excluded.started_at, updated_at=excluded.updated_at,
+                owner=excluded.owner
             """,
             (
                 task_id,
@@ -260,6 +335,7 @@ def record_run(task_id: str, code: str, result: dict) -> None:
                 result.get("timeout"),
                 result.get("started_at") or created_at,
                 _now(),
+                result.get("owner"),
             ),
         )
     conn.close()
@@ -293,6 +369,14 @@ def get_run(task_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     conn.close()
     return _run_row_to_dict(row) if row else None
+
+
+def list_run_rows() -> list[dict]:
+    """所有执行记录（不分页）。"""
+    conn = connect()
+    rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [_run_row_to_dict(r) for r in rows]
 
 
 def list_runs(
@@ -514,23 +598,107 @@ def list_events(limit: int = 100, action: str | None = None, target: str | None 
     return out
 
 
+# ─────────────────────────── users（租户/项目） ───────────────────────────
+
+
+def ensure_user(name: str, notes: str | None = None) -> dict:
+    """确保 user 存在（不存在就建）。返回 user 记录。"""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("user 名字不能为空")
+    conn = connect()
+    with conn:
+        row = conn.execute("SELECT * FROM users WHERE name=?", (name,)).fetchone()
+        if row is None:
+            user_id = "usr-" + uuid.uuid4().hex[:10]
+            conn.execute(
+                "INSERT INTO users (id, name, created_at, notes) VALUES (?, ?, ?, ?)",
+                (user_id, name, _now(), notes),
+            )
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_user(name: str) -> dict | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM users WHERE name=?", (str(name),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_users() -> list[dict]:
+    conn = connect()
+    rows = conn.execute("SELECT * FROM users ORDER BY created_at").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_user(name: str, **fields) -> dict | None:
+    allowed = {"notes", "quota_runs", "quota_memory_mb", "quota_services", "netns", "cidr", "uid"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return get_user(name)
+    cols = ", ".join(f"{k}=?" for k in fields)
+    conn = connect()
+    with conn:
+        conn.execute(f"UPDATE users SET {cols} WHERE name=?", (*fields.values(), str(name)))
+    conn.close()
+    return get_user(name)
+
+
+def delete_user(name: str) -> dict | None:
+    row = get_user(name)
+    if not row:
+        return None
+    conn = connect()
+    with conn:
+        conn.execute("DELETE FROM users WHERE name=?", (str(name),))
+    conn.close()
+    return row
+
+
+def user_resource_counts(name: str) -> dict:
+    """某个 user 名下的资源数量。"""
+    conn = connect()
+    out = {
+        "services": conn.execute(
+            "SELECT COUNT(*) FROM services WHERE owner=?", (name,)
+        ).fetchone()[0],
+        "runs": conn.execute("SELECT COUNT(*) FROM runs WHERE owner=?", (name,)).fetchone()[0],
+    }
+    conn.close()
+    return out
+
+
 # ─────────────────────────── berth_tokens（访问令牌） ───────────────────────────
 
 
-def insert_token(*, token_id: str, name: str, token_hash: str, scope: str) -> dict:
-    """登记一个 token（只存哈希）。"""
+def insert_token(
+    *, token_id: str, name: str, token_hash: str, user: str | None, ttl: int = 0
+) -> dict:
+    """登记一个 token（只存哈希）。ttl 秒，0 = 永不过期。"""
+    expires_at = None
+    if ttl and int(ttl) > 0:
+        from datetime import timedelta
+
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=int(ttl))
+        ).isoformat(timespec="seconds")
     conn = connect()
     with conn:
         conn.execute(
-            "INSERT INTO berth_tokens (id, name, token_hash, scope, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (token_id, name, token_hash, scope, _now()),
+            "INSERT INTO berth_tokens (id, name, token_hash, user, ttl, expires_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (token_id, name, token_hash, user, int(ttl or 0), expires_at, _now()),
         )
     conn.close()
     return {
         "id": token_id,
         "name": name,
-        "scope": _load_json(scope, {}),
+        "user": user,
+        "ttl": int(ttl or 0),
+        "expires_at": expires_at,
         "created_at": _now(),
         "last_used_at": None,
         "revoked_at": None,
@@ -543,11 +711,7 @@ def get_token_by_hash(token_hash: str) -> dict | None:
         "SELECT * FROM berth_tokens WHERE token_hash=?", (token_hash,)
     ).fetchone()
     conn.close()
-    if not row:
-        return None
-    d = dict(row)
-    d["scope"] = _load_json(d.get("scope"), {})
-    return d
+    return dict(row) if row else None
 
 
 def touch_token(token_id: str) -> None:
@@ -567,8 +731,8 @@ def list_token_rows() -> list[dict]:
     out = []
     for r in rows:
         d = dict(r)
-        d["scope"] = _load_json(d.get("scope"), {})
         d.pop("token_hash", None)  # 永远不返回哈希
+        d.pop("scope", None)       # 旧字段已废弃
         out.append(d)
     return out
 
@@ -585,7 +749,6 @@ def revoke_token_row(token_id: str) -> dict | None:
         )
     conn.close()
     d = dict(row)
-    d["scope"] = _load_json(d.get("scope"), {})
     d["revoked_at"] = _now()
     d.pop("token_hash", None)
     return d
