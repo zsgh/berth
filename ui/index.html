@@ -39,6 +39,7 @@
       <a href="#/images" :class="{active: route.section === 'images'}">镜像</a>
       <a href="#/templates" :class="{active: route.section === 'templates'}">模板</a>
       <a href="#/events" :class="{active: route.section === 'events'}">操作记录</a>
+      <a href="#/tokens" :class="{active: route.section === 'tokens'}" x-show="isAdmin">访问令牌</a>
     </nav>
     <div class="sidebar-foot">
       <button class="ghost" @click="logout()">退出</button>
@@ -222,6 +223,7 @@
           <div class="spacer"></div>
           <select name="runStatus" x-model="runs.filter.status" @change="runs.load()">
             <option value="">全部状态</option>
+            <option value="pending">pending</option>
             <option value="running">running</option>
             <option value="finished">finished</option>
             <option value="timeout">timeout</option>
@@ -396,18 +398,68 @@
         <div class="card muted" x-show="!volumes.rows.length">没有数据卷。</div>
       </section>
 
+      <!-- ── 访问令牌 ── -->
+      <section x-show="route.name === 'tokens'">
+        <div class="head-row">
+          <h2>访问令牌</h2>
+          <div class="spacer"></div>
+          <button class="ghost" @click="tokens.load()">刷新</button>
+          <button class="primary" @click="tokens.createOpen = true">签发令牌</button>
+        </div>
+
+        <div class="card" x-show="tokens.createOpen">
+          <h3>签发令牌</h3>
+          <div class="form-grid">
+            <label>名字<input name="tokenName" x-model="tokens.form.name" placeholder="shakedown-shop"></label>
+            <label>作用域项目（留空 = 能操作所有服务/执行）<input name="tokenProject" x-model="tokens.form.project" placeholder="shop"></label>
+          </div>
+          <p class="muted small">作用域按<strong>标签</strong>限定：这个令牌只能看到 / 操作带该标签的服务、执行和产物。造镜像、签发令牌这类宿主级操作只有 admin 能做。</p>
+          <div class="actions">
+            <button class="primary" @click="tokens.create()">签发</button>
+            <button class="ghost" @click="tokens.createOpen = false">取消</button>
+          </div>
+        </div>
+
+        <div class="card" x-show="tokens.created">
+          <h3>刚签发的令牌（明文只显示这一次）</h3>
+          <pre class="code" x-text="tokens.created"></pre>
+          <p class="muted small">复制走之后就没法再查了（库里只存哈希）。</p>
+        </div>
+
+        <table class="table" x-show="tokens.rows.length">
+          <thead><tr><th>id</th><th>名字</th><th>作用域</th><th>最近使用</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <template x-for="t in tokens.rows" :key="t.id">
+              <tr>
+                <td class="mono small" x-text="t.id"></td>
+                <td x-text="t.name"></td>
+                <td class="small mono" x-text="JSON.stringify(t.scope || {}) || '（全量数据）'"></td>
+                <td class="small mono" x-text="t.last_used_at || '—'"></td>
+                <td class="small mono" x-text="t.created_at"></td>
+                <td><span class="badge" :class="t.revoked_at ? 'crashed' : 'running'" x-text="t.revoked_at ? '已吊销' : '有效'"></span></td>
+                <td><button class="ghost sm" x-show="!t.revoked_at" @click="tokens.revoke(t)">吊销</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div class="card muted" x-show="!tokens.rows.length">还没有令牌。</div>
+      </section>
+
       <!-- ── 镜像 ── -->
       <section x-show="route.name === 'images'">
         <div class="head-row">
           <h2>镜像</h2>
           <div class="spacer"></div>
           <button class="ghost" @click="images.load()">刷新</button>
-          <button class="primary" @click="images.buildOpen = true" x-show="images.canBuild">制作镜像</button>
+          <button class="primary" @click="images.buildOpen = true" x-show="images.canBuild && isAdmin">制作镜像</button>
         </div>
 
         <div class="card muted" x-show="!images.canBuild">
           制作镜像未开启（这是宿主 root 级操作：chroot + apt 的 maintainer script 以 root 跑）。
           要开：设 <code>BERTH_ALLOW_IMAGE_BUILD=1</code> 后重启 daemon。
+        </div>
+        <div class="card muted" x-show="images.canBuild && !isAdmin">
+          当前令牌不是 admin，只能查看镜像（造/删镜像需要 admin token）。
         </div>
 
         <div class="card" x-show="images.buildOpen">

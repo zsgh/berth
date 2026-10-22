@@ -123,6 +123,16 @@ class RunRequest(BaseModel):
         return NetworkPolicy(**self.network)
 
 
+class TokenRequest(BaseModel):
+    """POST /tokens 请求体：签发访问令牌。"""
+
+    name: str = Field(..., description="令牌名（审计里显示）")
+    scope: dict | None = Field(
+        None,
+        description='作用域，如 {"labels": {"project": "shop"}}；不给 = 全权（admin）',
+    )
+
+
 class ImageBuildRequest(BaseModel):
     """POST /images 请求体：制作一个沙箱镜像（rootfs-<name>）。"""
 

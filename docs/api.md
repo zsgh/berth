@@ -6,16 +6,52 @@ Base URL：`http://127.0.0.1:9000`（默认只监听本机；对外监听要显�
 
 ## 鉴权（B1）
 
-配置了 `BERTH_TOKEN` 后，除 `/health` 和 `/ui/*` 外的所有接口都要带 Bearer token：
+除 `/health` 和 `/ui/*` 外的所有接口都要带 Bearer token：
 
 ```bash
 curl -H "Authorization: Bearer $BERTH_TOKEN" http://127.0.0.1:9000/system/info
 ```
 
-- 没配置 `BERTH_TOKEN` → 不鉴权（保持旧行为），启动日志会打警告
-- token 不对 → `401`（带 `WWW-Authenticate: Bearer`）
+- 没配置任何 token（环境变量空 + 库里没有）→ 不鉴权（保持旧行为），启动日志会打警告
+- token 不对 / 已吊销 → `401`（带 `WWW-Authenticate: Bearer`）
 - `/health` 永远免鉴权（探活用）
 - `/ui/*` 静态资源免鉴权（登录页要能加载；静态文件里没有敏感数据）
+
+### 两种令牌，权限不同
+
+| 来源 | 权限 | 怎么来的 |
+|---|---|---|
+| `BERTH_TOKEN`（环境变量，可逗号分隔多个） | **admin**：全部 + 宿主级操作（造/删镜像、签发令牌） | 你自己写在配置文件里 |
+| `berth_tokens` 表（`POST /tokens` 签发） | **非 admin**：能看能改服务/执行/产物；碰不到宿主级操作 | `scripts/berth_token.py create` 或 `POST /tokens` |
+
+**库里只存 token 的 sha256**，明文只在签发时返回一次（跟密码一样）。
+
+### 作用域（按标签隔离）
+
+签发的 token 可以带**作用域**（复用 labels 机制）：
+
+```json
+{"labels": {"project": "shop"}}
+```
+
+带这个 token 的调用方：
+
+- **只能看到 / 操作** labels 里包含 `project=shop` 的服务、执行、产物
+- **创建**资源时强制打上 `project=shop` 标签（不能建到别的项目去）
+- 作用域外的资源 → `404`（不泄露存在性）
+- 老资源（没有标签的）→ scoped token 看不见（默认拒绝）
+
+### 轮换（零停机）
+
+`BERTH_TOKEN` 可以挂多个（逗号分隔）→ 换的时候先加新的：
+
+```bash
+BERTH_TOKEN=旧的,新的     # 改完重启 berth
+# → 调用方切到新 token 验证通过
+BERTH_TOKEN=新的           # 再把旧的摘掉
+```
+
+库里签发的 token 直接吊销即可（`DELETE /tokens/{id}`，立刻生效）。
 
 ---
 
@@ -629,6 +665,48 @@ curl -s -X DELETE "localhost:9000/images/redis?force=true"
   "volumes": {"total": 3, "orphan": 1},
   "alerts": ["磁盘占用 92%（/var/lib/berth），接近写满"]
 }
+```
+
+---
+
+## 访问令牌
+
+### `GET /tokens`（admin）
+
+列出令牌（**不含明文/哈希**）：id、名字、作用域、创建时间、最近使用时间、吊销时间。
+
+### `POST /tokens`（admin）
+
+签发令牌。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 令牌名（审计里显示） |
+| `scope` | object? | 作用域，如 `{"labels": {"project": "shop"}}`；不给 = 能操作所有服务/执行 |
+
+```json
+{
+  "id": "tk-712c6e0d01",
+  "name": "shakedown-shop",
+  "scope": {"labels": {"project": "shop"}},
+  "created_at": "2026-01-01T10:00:00+00:00",
+  "last_used_at": null,
+  "revoked_at": null,
+  "token": "bt_xxxxxxxxxxxxxxxx",
+  "note": "token 明文只显示这一次，请立刻保存"
+}
+```
+
+### `DELETE /tokens/{id}`（admin）
+
+吊销令牌（立刻失效，调用方开始收到 401）。
+
+### 命令行等价物
+
+```bash
+python3 scripts/berth_token.py create --name shakedown-shop --project shop
+python3 scripts/berth_token.py list
+python3 scripts/berth_token.py revoke tk-712c6e0d01
 ```
 
 ---

@@ -28,6 +28,7 @@ class FakeRequest:
     def __init__(self, headers=None):
         self.headers = headers or {}
         self.scope = {"path_params": {}}
+        self.state = type("S", (), {})()
 
 
 def expect_401(fn, label):

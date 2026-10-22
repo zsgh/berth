@@ -119,6 +119,19 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC)")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS berth_tokens (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                token_hash  TEXT NOT NULL UNIQUE,   -- sha256，明文不落库
+                scope       TEXT,                    -- JSON：{"labels": {...}}
+                created_at  TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at  TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS image_builds (
                 id         TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
@@ -499,6 +512,83 @@ def list_events(limit: int = 100, action: str | None = None, target: str | None 
         d["detail"] = _load_json(d.get("detail"), None)
         out.append(d)
     return out
+
+
+# ─────────────────────────── berth_tokens（访问令牌） ───────────────────────────
+
+
+def insert_token(*, token_id: str, name: str, token_hash: str, scope: str) -> dict:
+    """登记一个 token（只存哈希）。"""
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO berth_tokens (id, name, token_hash, scope, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token_id, name, token_hash, scope, _now()),
+        )
+    conn.close()
+    return {
+        "id": token_id,
+        "name": name,
+        "scope": _load_json(scope, {}),
+        "created_at": _now(),
+        "last_used_at": None,
+        "revoked_at": None,
+    }
+
+
+def get_token_by_hash(token_hash: str) -> dict | None:
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM berth_tokens WHERE token_hash=?", (token_hash,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["scope"] = _load_json(d.get("scope"), {})
+    return d
+
+
+def touch_token(token_id: str) -> None:
+    """记录"最近一次使用"（审计用）。"""
+    conn = connect()
+    with conn:
+        conn.execute(
+            "UPDATE berth_tokens SET last_used_at=? WHERE id=?", (_now(), token_id)
+        )
+    conn.close()
+
+
+def list_token_rows() -> list[dict]:
+    conn = connect()
+    rows = conn.execute("SELECT * FROM berth_tokens ORDER BY created_at DESC").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["scope"] = _load_json(d.get("scope"), {})
+        d.pop("token_hash", None)  # 永远不返回哈希
+        out.append(d)
+    return out
+
+
+def revoke_token_row(token_id: str) -> dict | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM berth_tokens WHERE id=?", (token_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    with conn:
+        conn.execute(
+            "UPDATE berth_tokens SET revoked_at=? WHERE id=?", (_now(), token_id)
+        )
+    conn.close()
+    d = dict(row)
+    d["scope"] = _load_json(d.get("scope"), {})
+    d["revoked_at"] = _now()
+    d.pop("token_hash", None)
+    return d
 
 
 # ─────────────────────────── image_builds（镜像制作） ───────────────────────────

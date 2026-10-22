@@ -240,11 +240,37 @@ curl -s -X DELETE localhost:9000/images/myimg
 `network`（出网限制）、`init`（初始化怎么执行）、`mounts`（只读挂载被测代码）。
 完整字段表见 [docs/api.md](docs/api.md)。
 
+## 令牌与作用域
+
+berth 有两种令牌，权限不同：
+
+| 来源 | 权限 | 用途 |
+|---|---|---|
+| `BERTH_TOKEN`（环境变量，可挂多个） | **admin**：全部 + 宿主级操作（造/删镜像、签发令牌） | 你自己的控制面凭证 |
+| `POST /tokens` / `scripts/berth_token.py` 签发 | **非 admin**：能看能改服务/执行/产物 | 给 agent / agent 用 |
+
+签发的 token 可以带**作用域**（按标签隔离）：
+
+```bash
+# 签一个只管 shop 项目的令牌
+python3 scripts/berth_token.py create --name shakedown-shop --project shop
+# → token: bt_xxxx（明文只显示这一次，库里只存 sha256）
+
+# 之后这个 token 只能看到 / 操作 project=shop 的服务、执行、产物
+curl -H "Authorization: Bearer bt_xxxx" localhost:9000/services
+```
+
+**轮换零停机**：`BERTH_TOKEN=旧的,新的` → 改完重启 → 调用方切新的 → 验证通过 → 摘掉旧的。
+库里签发的 token 直接 `DELETE /tokens/{id}` 吊销，立刻失效。
+
+> 为什么沙箱在 host 网络下也必须配 token：沙箱里的代码能直连 `127.0.0.1:9000`，
+> 没有 token 就能删别的项目的服务和数据卷。token 防的就是这个（不是防外网）。
+
 ## 配置（环境变量）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `BERTH_TOKEN` | - | Bearer token；**未设置 = 不鉴权**（启动日志会警告） |
+| `BERTH_TOKEN` | - | Bearer token（**可逗号分隔多个** → 零停机轮换）；**未设置 = 不鉴权**（启动日志会警告） |
 | `BERTH_HOST` | `127.0.0.1` | 监听地址（对外监听需显式配置） |
 | `BERTH_PORT` | `9000` | 监听端口 |
 | `BERTH_HOME` | `/var/lib/berth` | 运行数据根目录（任务 overlay、workspace、服务卷） |
@@ -328,6 +354,7 @@ python3 tests/test_labels.py         # B12 标签过滤 / 状态流转 / 审计
 python3 tests/test_service_spec.py   # B5/B10/B11 overrides / spec / 模板校验
 python3 tests/test_api.py            # HTTP 层（鉴权 / 上传下载 / 标签 / 孤儿卷 / UI 资源）
 python3 tests/test_image_mgmt.py      # 镜像管理（制作 / 删除 / 占用保护）
+python3 tests/test_tokens.py          # 令牌与作用域（签发 / 隔离 / admin-only）
 
 scripts/smoke_services.sh           # 起 redis → 外部连上 → 停止
 scripts/smoke_persistence.sh        # kill daemon → 重启 → 状态恢复 + 孤儿清理

@@ -153,6 +153,7 @@ function shell() {
     runCount: 0,
     healthClass: 'bad',
     healthText: '未连接',
+    isAdmin: true,
     confirm: {
       open: false, title: '', message: '', name: '', needName: true,
       input: '', okText: '', error: '', resolve: null,
@@ -449,6 +450,38 @@ function shell() {
       },
     },
 
+    tokens: {
+      rows: [], createOpen: false, created: '',
+      form: { name: '', project: '' },
+      async load() { this.rows = await api('/tokens'); },
+      async create() {
+        const f = this.form;
+        if (!f.name.trim()) return say('请填令牌名', 'err');
+        const body = { name: f.name.trim() };
+        if (f.project.trim()) body.scope = { labels: { project: f.project.trim() } };
+        try {
+          const r = await api('/tokens', { method: 'POST', json: body });
+          this.created = r.token;
+          this.createOpen = false;
+          say('已签发：' + r.id + '（明文只显示这一次）');
+          await this.load();
+        } catch (e) { say(String(e.message || e), 'err'); }
+      },
+      async revoke(t) {
+        const ok = await askConfirm({
+          title: '吊销令牌 ' + t.name,
+          message: '用这个令牌的调用方会立刻开始收到 401。',
+          name: t.id, okText: '吊销',
+        });
+        if (!ok) return;
+        try {
+          await api('/tokens/' + encodeURIComponent(t.id), { method: 'DELETE' });
+          say('已吊销 ' + t.name);
+        } catch (e) { say(String(e.message || e), 'err'); }
+        await this.load();
+      },
+    },
+
     images: {
       rows: [], builds: [], buildOpen: false, canBuild: false, canDelete: true,
       form: { name: '', base: 'base', packages: '', pip: '', commands: '', force: false },
@@ -548,6 +581,7 @@ function shell() {
         try {
           this.info = await api('/system/info');
           this.loggedIn = true;
+          this.isAdmin = !!(this.info.principal && this.info.principal.admin);
           this.healthClass = 'ok';
           this.healthText = 'berth 正常 · v' + (this.info.version || '') + '（未启用鉴权）';
         } catch (e) { /* 需要 token：停在登录页 */ }
@@ -565,8 +599,10 @@ function shell() {
       try {
         this.info = await api('/system/info');
         this.loggedIn = true;
+        this.isAdmin = !!(this.info.principal && this.info.principal.admin);
         this.healthClass = 'ok';
-        this.healthText = 'berth 正常 · v' + (this.info.version || '');
+        this.healthText = 'berth 正常 · v' + (this.info.version || '')
+          + (this.isAdmin ? '' : '（受限令牌：' + (this.info.principal.name || '') + '）');
         this.onRoute();
       } catch (e) {
         this.loggedIn = false;
@@ -630,6 +666,8 @@ function shell() {
           await this.templates.load();
         } else if (name === 'events') {
           await this.events.load();
+        } else if (name === 'tokens') {
+          await this.tokens.load();
         }
       } catch (e) {
         this.say(String(e.message || e), 'err');
@@ -655,6 +693,8 @@ function shell() {
           p(() => this.volumes.load());
         } else if (name === 'images') {
           p(() => this.images.load());
+        } else if (name === 'tokens') {
+          p(() => this.tokens.load());
         }
       }, POLL_MS);
     },

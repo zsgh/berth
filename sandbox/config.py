@@ -28,8 +28,19 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 
 def token() -> str | None:
     """Bearer token；未配置返回 None（表示不鉴权）。"""
-    value = (os.environ.get("BERTH_TOKEN") or "").strip()
-    return value or None
+    values = tokens()
+    return values[0] if values else None
+
+
+def tokens() -> list[str]:
+    """有效的 Bearer token 列表（admin）。
+
+    `BERTH_TOKEN` 可以是逗号/空格分隔的多个 —— 轮换时同时挂新旧两个，
+    客户端切完再把旧的摘掉（零停机）。
+    """
+    raw = os.environ.get("BERTH_TOKEN") or ""
+    out = [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+    return out
 
 
 def bind_host() -> str:

@@ -55,8 +55,17 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.auth import actor_of, require_auth
-from api.schemas import EnsureRequest, ImageBuildRequest, RunRequest
+from api.auth import (
+    _has_db_tokens,
+    actor_of,
+    can_touch,
+    forbid_out_of_scope,
+    principal_of,
+    require_admin,
+    require_auth,
+    scoped_labels,
+)
+from api.schemas import EnsureRequest, ImageBuildRequest, RunRequest, TokenRequest
 from sandbox import config
 from sandbox.files import (
     file_tree,
@@ -215,7 +224,7 @@ def _check_limits(timeout: int, memory_mb: int, cpu_percent: int, processes: int
 
 
 @api.post("/scripts/run")
-def scripts_run(req: RunRequest) -> dict:
+def scripts_run(req: RunRequest, request: Request) -> dict:
     """跑一次性代码/命令：overlayfs 沙箱执行 → 返回结果 → 自动清理。
 
     code 和 cmd 二选一：
@@ -247,7 +256,8 @@ def scripts_run(req: RunRequest) -> dict:
         tasks_max=req.processes or config.max_processes(),
         network=req.network_policy().to_dict(),
         mounts=[m.model_dump() for m in (req.mounts or [])],
-        labels=req.labels or {},
+        # 创建时强制打上作用域标签（scoped token 不能建到别的项目去）
+        labels=scoped_labels(request, req.labels),
     )
     try:
         if req.async_:
@@ -259,6 +269,7 @@ def scripts_run(req: RunRequest) -> dict:
 
 @api.get("/scripts")
 def scripts_list(
+    request: Request,
     limit: int = Query(100, ge=1, le=1000),
     status: str | None = None,
     image: str | None = None,
@@ -266,7 +277,10 @@ def scripts_list(
     cursor: str | None = None,
     label: list[str] | None = Query(None, description="标签过滤，如 ?label=project=foo"),
 ) -> dict:
-    """执行列表（支持状态 / 镜像 / 时间 / 标签过滤 + 游标分页）。"""
+    """执行列表（支持状态 / 镜像 / 时间 / 标签过滤 + 游标分页）。
+
+    带作用域的 token 只能看到自己作用域内的执行。
+    """
     runs = list_runs(
         limit=limit,
         status=status,
@@ -275,12 +289,60 @@ def scripts_list(
         labels=parse_label_filters(label),
         cursor=cursor,
     )
+    principal = principal_of(request)
+    if not principal.admin:
+        runs = [r for r in runs if can_touch(request, r.get("labels"))]
     next_cursor = runs[-1]["created_at"] if runs and len(runs) == limit else None
     return {"runs": runs, "count": len(runs), "next_cursor": next_cursor}
 
 
+def _run_or_404(request: Request, task_id: str) -> dict:
+    """取执行记录；不在作用域内 → 404（不泄露存在性）。"""
+    record = get_run(task_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"no run for task_id={task_id}")
+    forbid_out_of_scope(request, record.get("labels"), "执行")
+    return record
+
+
+def _task_scope_check(request: Request, task_id: str) -> dict | None:
+    """任务（workspace）的归属检查；没有记录 → None（还没人用过）。
+
+    重要：scoped token 往**别人项目的 task_id** 里上传文件 = 植入待执行代码，
+    所以上传时会建一个带作用域标签的占位记录，把这个 task 圈进自己的域。
+    """
+    record = get_run(task_id)
+    if record is None:
+        return None
+    forbid_out_of_scope(request, record.get("labels"), "执行")
+    return record
+
+
+def _claim_task(request: Request, task_id: str) -> dict:
+    """确保 task 有归属记录（新建时打上作用域标签）。"""
+    record = _task_scope_check(request, task_id)
+    if record is not None:
+        return record
+    from state.db import record_run
+
+    record_run(
+        task_id,
+        "",
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": None,
+            "duration": 0,
+            "artifacts": [],
+            "status": "pending",
+            "labels": scoped_labels(request, None),
+        },
+    )
+    return get_run(task_id) or {}
+
+
 @api.get("/scripts/{task_id}")
-def scripts_get(task_id: str, offset: int = Query(0, ge=0, description="stdout 增量偏移")) -> dict:
+def scripts_get(request: Request, task_id: str, offset: int = Query(0, ge=0, description="stdout 增量偏移")) -> dict:
     """某次执行的状态 / 历史记录。
 
     还在跑 → status=running，并带实时输出（?offset= 增量读）。
@@ -290,6 +352,7 @@ def scripts_get(task_id: str, offset: int = Query(0, ge=0, description="stdout �
     record = runs_mod.run_status(task_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"no run for task_id={task_id}")
+    forbid_out_of_scope(request, record.get("labels"), "执行")
     if offset:
         stdout = record.get("stdout") or ""
         record["stdout"] = stdout[int(offset):]
@@ -298,10 +361,11 @@ def scripts_get(task_id: str, offset: int = Query(0, ge=0, description="stdout �
 
 
 @api.post("/scripts/{task_id}/cancel")
-def scripts_cancel(task_id: str) -> dict:
+def scripts_cancel(request: Request, task_id: str) -> dict:
     """取消正在跑的执行。"""
     from sandbox import runs as runs_mod
 
+    _run_or_404(request, task_id)
     result = runs_mod.cancel(task_id)
     if not result.get("cancelled"):
         raise HTTPException(status_code=404, detail=f"没有在跑的执行: {task_id}")
@@ -309,8 +373,9 @@ def scripts_cancel(task_id: str) -> dict:
 
 
 @api.post("/scripts/{task_id}/clear")
-def scripts_clear(task_id: str) -> dict:
+def scripts_clear(request: Request, task_id: str) -> dict:
     """清空任务的 workspace（下次执行是全新环境）。"""
+    _task_scope_check(request, task_id)
     ws = BASE_DIR / "scripts" / task_id
     if ws.exists():
         # workspace 里有沙箱 uid(1000) 的文件，用 root 删
@@ -351,12 +416,13 @@ async def scripts_stream(task_id: str, offset: int = Query(0, ge=0)):
 
 
 @api.get("/scripts/{task_id}/tree")
-def scripts_tree(task_id: str) -> dict:
+def scripts_tree(request: Request, task_id: str) -> dict:
     """workspace 文件树（带大小 / mime）。"""
     try:
         validate_task_id(task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _task_scope_check(request, task_id)
     entries = file_tree(task_id)
     return {"task_id": task_id, "workspace": str(task_workspace(task_id)), "files": entries}
 
@@ -373,6 +439,7 @@ async def scripts_upload(task_id: str, request: Request):
         validate_task_id(task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _claim_task(request, task_id)
 
     content_type = request.headers.get("content-type", "")
     try:
@@ -427,12 +494,13 @@ def scripts_download(task_id: str, path: str = Query("", description="子目录�
 
 
 @api.get("/scripts/{task_id}/files/{file_path:path}")
-def scripts_download_file(task_id: str, file_path: str, preview: bool = Query(False)):
+def scripts_download_file(request: Request, task_id: str, file_path: str, preview: bool = Query(False)):
     """下载单个文件（?preview=1 可以内联预览，HTML 会带严格 CSP）。"""
     try:
         validate_task_id(task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _task_scope_check(request, task_id)
     try:
         data = read_file(task_id, file_path)
     except FileNotFoundError:
@@ -455,7 +523,7 @@ def scripts_download_file(task_id: str, file_path: str, preview: bool = Query(Fa
 
 
 @api.delete("/scripts/{task_id}/files/{file_path:path}")
-def scripts_delete_file(task_id: str, file_path: str) -> dict:
+def scripts_delete_file(request: Request, task_id: str, file_path: str) -> dict:
     """删 workspace 里的文件。"""
     from sandbox.files import delete_path
 
@@ -463,6 +531,7 @@ def scripts_delete_file(task_id: str, file_path: str) -> dict:
         validate_task_id(task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _task_scope_check(request, task_id)
     try:
         return delete_path(task_id, file_path)
     except ValueError as e:
@@ -472,8 +541,19 @@ def scripts_delete_file(task_id: str, file_path: str) -> dict:
 # ─────────────────────────── 长驻服务 ───────────────────────────
 
 
+def _service_or_404(request: Request, ref: str) -> dict:
+    """取服务记录；不在作用域内 → 404。"""
+    from sandbox.service import resolve_ref
+
+    row = resolve_ref(ref)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {ref}")
+    forbid_out_of_scope(request, row.get("labels"), "服务")
+    return row
+
+
 @api.put("/services/{ref}")
-def services_ensure(ref: str, req: EnsureRequest) -> dict:
+def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
     """ensure 语义（幂等）：不存在则创建；已停止则原样再起（复用数据卷）；
     已在运行直接返回现有实例；名字被不同模板占用返回 409。
 
@@ -482,6 +562,12 @@ def services_ensure(ref: str, req: EnsureRequest) -> dict:
     """
     if not req.template and not req.spec:
         raise HTTPException(status_code=400, detail="必须给 template（模板名）或 spec（内联模板）")
+    # 已存在但在作用域外 → 404（不泄露存在性）
+    from sandbox.service import resolve_ref
+
+    existing = resolve_ref(ref)
+    if existing is not None:
+        forbid_out_of_scope(request, existing.get("labels"), "服务")
     try:
         return start_service(
             req.template or "",
@@ -489,7 +575,8 @@ def services_ensure(ref: str, req: EnsureRequest) -> dict:
             spec=req.spec,
             overrides=req.overrides_dict(),
             init=req.init_spec().model_dump(exclude_none=True),
-            labels=req.labels or {},
+            # 创建时强制打上作用域标签
+            labels=scoped_labels(request, req.labels),
             task_id=req.task_id,
         )
     except ServiceConflictError as e:
@@ -504,31 +591,41 @@ def services_ensure(ref: str, req: EnsureRequest) -> dict:
 
 @api.get("/services")
 def services_list(
+    request: Request,
     all: bool = False,
     status: str | None = None,
     usage: bool = True,
     label: list[str] | None = Query(None, description="标签过滤，如 ?label=project=foo"),
 ) -> list[dict]:
-    """服务列表：默认只列活跃服务（?all=true 含历史，?usage=false 跳过用量统计）。"""
-    return list_services(
+    """服务列表：默认只列活跃服务（?all=true 含历史，?usage=false 跳过用量统计）。
+
+    带作用域的 token 只看得到自己作用域内的服务。
+    """
+    rows = list_services(
         include_inactive=all,
         status=status,
         with_usage=usage,
         labels=parse_label_filters(label),
     )
+    principal = principal_of(request)
+    if not principal.admin:
+        rows = [r for r in rows if can_touch(request, r.get("labels"))]
+    return rows
 
 
 @api.get("/services/{ref}")
-def services_get(ref: str) -> dict:
+def services_get(request: Request, ref: str) -> dict:
     svc = get_service(ref)
     if not svc:
         raise HTTPException(status_code=404, detail=f"no such service: {ref}")
+    forbid_out_of_scope(request, svc.get("labels"), "服务")
     return svc
 
 
 @api.post("/services/{ref}/stop")
-def services_stop(ref: str) -> dict:
+def services_stop(request: Request, ref: str) -> dict:
     """停止服务（保留记录与数据卷）。"""
+    _service_or_404(request, ref)
     try:
         return stop_service(ref)
     except ValueError as e:
@@ -536,8 +633,9 @@ def services_stop(ref: str) -> dict:
 
 
 @api.post("/services/{ref}/start")
-def services_start_existing(ref: str) -> dict:
+def services_start_existing(request: Request, ref: str) -> dict:
     """把已停止的服务原样再起（复用数据卷，端口优先复用）。"""
+    _service_or_404(request, ref)
     try:
         return start_existing_service(ref)
     except ValueError as e:
@@ -545,8 +643,9 @@ def services_start_existing(ref: str) -> dict:
 
 
 @api.post("/services/{ref}/reset")
-def services_reset(ref: str, keep_backup: bool = Query(False)) -> dict:
+def services_reset(request: Request, ref: str, keep_backup: bool = Query(False)) -> dict:
     """重置服务：停止 → 清数据卷 → 重放 init → 启动。"""
+    _service_or_404(request, ref)
     try:
         return reset_service(ref, keep_backup=keep_backup)
     except ValueError as e:
@@ -554,8 +653,9 @@ def services_reset(ref: str, keep_backup: bool = Query(False)) -> dict:
 
 
 @api.delete("/services/{ref}")
-def services_delete(ref: str, volumes: bool = False) -> dict:
+def services_delete(request: Request, ref: str, volumes: bool = False) -> dict:
     """停止并删除服务记录；?volumes=true 连数据卷一起删（docker rm -v 语义）。"""
+    _service_or_404(request, ref)
     try:
         return delete_service(ref, volumes=volumes)
     except ValueError as e:
@@ -564,12 +664,14 @@ def services_delete(ref: str, volumes: bool = False) -> dict:
 
 @api.get("/services/{ref}/logs")
 def services_logs(
+    request: Request,
     ref: str,
     tail: int = Query(100, ge=1, le=10000),
     since: str | None = None,
     follow: bool = False,
 ):
     """服务日志（journalctl -u berth-svc-{id}）；?follow=true 是 SSE。"""
+    _service_or_404(request, ref)
     if follow:
         async def gen():
             try:
@@ -599,14 +701,29 @@ def services_logs(
 
 
 @api.get("/volumes")
-def volumes_list() -> list[dict]:
+def volumes_list(request: Request) -> list[dict]:
     """所有数据卷一览：归属、占用字节数、是否孤儿（记录已删但卷还在）。"""
-    return list_volumes()
+    rows = list_volumes()
+    principal = principal_of(request)
+    if not principal.admin:
+        rows = [v for v in rows if can_touch(request, _service_labels_of(v.get("service_id")))]
+    return rows
+
+
+def _service_labels_of(service_id: str | None) -> dict:
+    """某个服务（按 service_id）的 labels —— 数据卷归属判定用。"""
+    if not service_id:
+        return {}
+    from state.db import get_service_row
+
+    row = get_service_row(service_id)
+    return (row or {}).get("labels") or {}
 
 
 @api.delete("/volumes/{service_id}")
-def volumes_delete(service_id: str) -> dict:
+def volumes_delete(request: Request, service_id: str) -> dict:
     """清理**孤儿**卷（记录已删但卷还在磁盘上）。非孤儿卷返回 409。"""
+    forbid_out_of_scope(request, _service_labels_of(service_id), "卷")
     try:
         return delete_volume(service_id)
     except ValueError as e:
@@ -617,7 +734,7 @@ def volumes_delete(service_id: str) -> dict:
 
 
 @api.get("/system/info")
-def system_info() -> dict:
+def system_info(request: Request) -> dict:
     """版本、配置的上限、白名单挂载目录、镜像列表、网络策略能力。"""
     from sandbox.mounts import allowed_roots
     from sandbox.network import network_capabilities
@@ -638,7 +755,11 @@ def system_info() -> dict:
         },
         "templates": list_templates(),
         "network": network_capabilities(),
-        "auth": {"enabled": bool(config.token()), "scheme": "Bearer"},
+        "auth": {
+            "enabled": bool(config.token()) or bool(_has_db_tokens()),
+            "scheme": "Bearer",
+        },
+        "principal": principal_of(request).to_dict(),
         "ui": {"enabled": config.ui_enabled(), "path": "/ui/"},
         "home": str(BASE_DIR),
     }
@@ -757,7 +878,7 @@ def images_list() -> list[dict]:
 
 
 @api.post("/images", status_code=202)
-def images_build(req: ImageBuildRequest) -> dict:
+def images_build(request: Request, req: ImageBuildRequest) -> dict:
     """**制作**一个沙箱镜像（后台跑，立即返回 build id）。
 
     这是宿主 root 级操作（chroot + apt），默认关闭：
@@ -765,6 +886,7 @@ def images_build(req: ImageBuildRequest) -> dict:
     """
     from sandbox.images import start_image_build
 
+    require_admin(request)   # 宿主级操作：只有 admin 能造镜像
     try:
         return start_image_build(
             name=req.name,
@@ -800,7 +922,7 @@ def images_build_get(build_id: str) -> dict:
 
 
 @api.delete("/images/{name}")
-def images_delete(name: str, force: bool = Query(False, description="占用中时先停掉服务再删")) -> dict:
+def images_delete(request: Request, name: str, force: bool = Query(False, description="占用中时先停掉服务再删")) -> dict:
     """**删除**一个镜像（只删 berth 自己管的 rootfs-* 目录）。
 
     - `base` 镜像：拒绝
@@ -810,6 +932,7 @@ def images_delete(name: str, force: bool = Query(False, description="占用中�
     """
     from sandbox.images import delete_image
 
+    require_admin(request)   # 宿主级操作：只有 admin 能删镜像
     try:
         return delete_image(name, force=force)
     except PermissionError as e:
@@ -863,6 +986,48 @@ def events_list(
 ) -> list[dict]:
     """操作审计记录。"""
     return list_events(limit=limit, action=action, target=target)
+
+
+# ─────────────────────────── 访问令牌 ───────────────────────────
+
+
+@api.get("/tokens")
+def tokens_list(request: Request) -> list[dict]:
+    """列出访问令牌（不返回 token 本身，只返回元信息）。"""
+    require_admin(request)
+    from sandbox.tokens import list_tokens
+
+    return list_tokens()
+
+
+@api.post("/tokens", status_code=201)
+def tokens_create(request: Request, req: TokenRequest) -> dict:
+    """签发一个访问令牌。
+
+    **明文 token 只在这里返回一次**（库里只存 sha256）—— 丢了就重新签发一个。
+    scope 形如 `{"labels": {"project": "shop"}}`：这个 token 只能看到 / 操作
+    带 project=shop 标签的服务、执行、产物。
+    """
+    require_admin(request)
+    from sandbox.tokens import create_token
+
+    try:
+        record, raw = create_token(req.name, req.scope)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**record, "token": raw, "note": "token 明文只显示这一次，请立刻保存"}
+
+
+@api.delete("/tokens/{token_id}")
+def tokens_revoke(request: Request, token_id: str) -> dict:
+    """吊销一个令牌（立即失效）。"""
+    require_admin(request)
+    from sandbox.tokens import revoke_token
+
+    record = revoke_token(token_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"没有这个令牌: {token_id}")
+    return {**record, "revoked": True}
 
 
 # ─────────────────────────── 挂载 ───────────────────────────
