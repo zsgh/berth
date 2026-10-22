@@ -80,7 +80,6 @@ def main():
 
     print("=== 创建时归属强制 ===")
     assert owner_for_create(p, "evil") == "shop", "普通令牌不能把资源建到别人名下"
-    admin = resolve_token("x")  # None
     from sandbox.tokens import Principal
 
     adm = Principal(admin=True, name="admin", source="env")
@@ -178,7 +177,7 @@ def main():
     })
 
     shop_token = create_token("shop-token", "shop")[1]
-    other_token = create_token("other-token", "other")[1]
+    create_token("other-token", "other")
     admin_token = "admin-token-xyz"
     os.environ["BERTH_TOKEN"] = admin_token
 

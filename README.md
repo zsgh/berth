@@ -246,12 +246,17 @@ curl -s -X DELETE localhost:9000/images/myimg
 
 ```bash
 sudo scripts/berth_admin.sh setup      # 配置 + 开机自启 + 自检（幂等，能重复跑）
-sudo scripts/berth_admin.sh status     # 看状态（daemon / 服务 / token 情况）
-sudo scripts/berth_admin.sh token      # 打印 admin token
-sudo scripts/berth_admin.sh sign --name shakedown --project shop   # 给 agent 签受限令牌
+sudo scripts/berth_admin.sh status     # 看状态（daemon / 服务 / user / token 情况）
+sudo scripts/berth_admin.sh token      # 打印超级管理员令牌
+sudo scripts/berth_admin.sh tls        # 生成自签证书并启用 HTTPS（公网暴露必做）
+sudo scripts/berth_admin.sh tls-off    # 关掉 HTTPS（本地开发方便）
+sudo scripts/berth_admin.sh sign --name <agent> --user <项目> --ttl 3600 --out <agent的目录>/.berth/token
 sudo scripts/berth_admin.sh list       # 列出令牌
 sudo scripts/berth_admin.sh revoke tk-xxxx
-sudo scripts/berth_admin.sh rotate     # 轮换 admin token（旧的 5 分钟内仍有效）
+sudo scripts/berth_admin.sh users      # 列出 user（租户/项目）
+sudo scripts/berth_admin.sh adduser acme --quota-runs 10
+sudo scripts/berth_admin.sh share mysql          # 把服务设为全局共享（人人可见、只读）
+sudo scripts/berth_admin.sh rotate     # 轮换超级管理员令牌（旧的 5 分钟内仍有效）
 sudo scripts/berth_admin.sh logs       # 看 daemon 日志
 ```
 
@@ -266,76 +271,72 @@ sudo scripts/berth_admin.sh logs       # 看 daemon 日志
 
 | 场景 | 命令 |
 |---|---|
-| 给 agent 发一个管某个项目的令牌 | `sudo scripts/berth_admin.sh sign --name <agent> --project <项目>` |
-| agent 令牌泄了 | `sudo scripts/berth_admin.sh revoke tk-xxxx` |
-| admin token 要换 | `sudo scripts/berth_admin.sh rotate`（新旧并存 5 分钟，调用方无缝切） |
+| 给 agent 发一个管某个 user 的令牌 | `sudo scripts/berth_admin.sh sign --name <agent> --user <user> --ttl 3600` |
+| agent 令牌泄了 | `sudo scripts/berth_admin.sh revoke tk-xxxx`（或等它过期） |
+| 超级管理员令牌要换 | `sudo scripts/berth_admin.sh rotate`（新旧并存 5 分钟，调用方无缝切） |
 
-## 令牌与作用域
+### 公网暴露检查清单
 
-berth 有两种令牌，权限不同：
+```bash
+sudo scripts/berth_admin.sh tls      # ① TLS（自签证书；平台侧用 --ca / BERTH_CA_FILE 校验）
+sudo scripts/berth_admin.sh status   # ② 确认 unit active、token 已启用
+# ③ 防火墙只放行平台来源 IP；管理端口别对公网开
+# ④ 不要开 BERTH_ALLOW_IMAGE_BUILD（除非真的要在这台机器上造镜像）
+```
 
-| 来源 | 权限 | 用途 |
+## 令牌、user 与隔离
+
+**user = 租户/项目/团队**，是一等公民（`users` 表）。berth 有两种身份：
+
+| 来源 | 身份 | 能做什么 |
 |---|---|---|
-| `BERTH_TOKEN`（环境变量，可挂多个） | **admin**：全部 + 宿主级操作（造/删镜像、签发令牌） | 你自己的控制面凭证 |
-| `POST /tokens` / `scripts/berth_token.py` 签发 | **非 admin**：能看能改服务/执行/产物 | 给 agent / agent 用 |
+| `BERTH_TOKEN`（环境变量 / 只读配置文件，可挂多个） | **超级管理员**（独一份） | 跨 user + 宿主级操作（造/删镜像、管 user、签发令牌） |
+| `POST /tokens` / `scripts/berth_token.py` 签发 | 某个 **user** | 只能看到/操作这个 user 的资源 + 全局共享资源（只读） |
 
-### 「项目」到底填什么？
+**授权判定 = owner 相等**（不是标签匹配 —— 标签拼错/多标签歧义/同名即同域都会出问题）：
 
-**填 agent / 租户的名字**（不是服务名，不是每次运行的名字）：
+| 资源 | 归属 | 谁能看 | 谁能改 |
+|---|---|---|---|
+| 某个 user 私有 | `owner = <user>` | 该 user + 超管 | 该 user + 超管 |
+| **全局共享**（公共 mysql/redis） | `owner` 为空 | 所有 user | **只有超管** |
+| 别人的 | `owner = 别人` | 看不见（`404`） | — |
 
-```bash
-# agent 叫 shakedown，服务它的是 shop 项目
-sudo scripts/berth_admin.sh sign --name shakedown --project shop
-```
+`labels` 退化成**元数据**（UI 分组、检索、统计），不再参与授权判定。
 
-之后这个 agent 用这个 token 建的任何资源都会**自动**被打上 `project=shop` 标签
-（它自己传别的 project 标签会被改写），别的 agent 的 token 动不了。
-
-**公共资源怎么办**（所有项目共用的 mysql / redis）—— 标成共享：
+### 给 agent 发令牌
 
 ```bash
-sudo scripts/berth_admin.sh share mysql     # → labels: {"shared": "true"}
+# 绑定到一个 user，带有效期（动态 worker 场景：派活时换 1 小时的）
+sudo scripts/berth_admin.sh sign --name w-1 --user shop --ttl 3600 \
+    --out /home/agent/.berth/token
 ```
 
-| | agent 的 scoped token | admin |
-|---|---|---|
-| 看到公共 mysql（拿 host:port 去连） | ✅ | ✅ |
-| 停 / 删公共 mysql | ❌ 403 | ✅ |
-
-### 作用域怎么用
-
-签发的 token 可以带**作用域**（按标签隔离）：
+### 公共资源
 
 ```bash
-# 签一个只管 shop 项目的令牌
-python3 scripts/berth_token.py create --name shakedown-shop --project shop
-# → token: bt_xxxx（明文只显示这一次，库里只存 sha256）
-
-# 之后这个 token 只能看到 / 操作 project=shop 的服务、执行、产物
-curl -H "Authorization: Bearer bt_xxxx" localhost:9000/services
+sudo scripts/berth_admin.sh share mysql               # owner 置空 → 全局共享（人人可见、只读）
+sudo scripts/berth_admin.sh share mysql --owner acme  # 或划给某个 user
 ```
-
-**轮换零停机**：`BERTH_TOKEN=旧的,新的` → 改完重启 → 调用方切新的 → 验证通过 → 摘掉旧的。
-库里签发的 token 直接 `DELETE /tokens/{id}` 吊销，立刻失效。
 
 ### 自动获取 token（不用把长期凭证复制来复制去）
 
 ```bash
-# A. 本地令牌文件（推荐，同机 agent 零配置）
-#    berth 侧：BERTH_TOKEN_FILE=/run/berth/token  → 启动时自动生成（0600）
-#    agent 侧：读这个文件就行
-python3 scripts/berth_client.py get /services        # 自动找 token + 带 header
+# A. 本地令牌文件（同机 agent 零配置）
+#    berth 侧：BERTH_TOKEN_FILE=/run/berth/token → 启动时自动生成（0600）
+#    agent 侧：读自己那份文件
+python3 scripts/berth_client.py get /services
 
-# B. 一次性引导码（跨机接入，不用碰 admin 凭证）
-python3 scripts/berth_token.py bootstrap              # 看/生成引导码
-curl -X POST http://<berth>:9000/tokens/bootstrap \
-  -H 'Content-Type: application/json' \
-  -d '{"code": "SJBBQ3P9", "name": "shakedown", "scope": {"labels": {"project": "shop"}}}'
-# → 换到一个受限 token（不是 admin，只能管自己作用域）
+# B. 一次性引导码（跨机接入，不用碰超级管理员凭证）
+python3 scripts/berth_token.py bootstrap
+curl -X POST http://<berth>:9000/tokens/bootstrap -H 'Content-Type: application/json' \
+  -d '{"code": "SJBBQ3P9", "name": "w-1", "user": "shop", "ttl": 3600}'
 ```
 
+**轮换零停机**：`BERTH_TOKEN=旧的,新的` → 改完重启 → 调用方切新的 → 验证通过 → 摘掉旧的。
+库里签发的 token 直接 `DELETE /tokens/{id}` 吊销，或等它过期。
+
 > 为什么沙箱在 host 网络下也必须配 token：沙箱里的代码能直连 `127.0.0.1:9000`，
-> 没有 token 就能删别的项目的服务和数据卷。token 防的就是这个（不是防外网）。
+> 没有 token 就能删别的 user 的服务和数据卷。token 防的就是这个（不是防外网）。
 
 ## 配置（环境变量）
 

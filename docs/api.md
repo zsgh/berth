@@ -17,47 +17,51 @@ curl -H "Authorization: Bearer $BERTH_TOKEN" http://127.0.0.1:9000/system/info
 - `/health` 永远免鉴权（探活用）
 - `/ui/*` 静态资源免鉴权（登录页要能加载；静态文件里没有敏感数据）
 
-### 两种令牌，权限不同
+### 两种身份
 
-| 来源 | 权限 | 怎么来的 |
+| 来源 | 身份 | 能做什么 |
 |---|---|---|
-| `BERTH_TOKEN`（环境变量，可逗号分隔多个） | **admin**：全部 + 宿主级操作（造/删镜像、签发令牌） | 你自己写在配置文件里 |
-| `berth_tokens` 表（`POST /tokens` 签发） | **非 admin**：能看能改服务/执行/产物；碰不到宿主级操作 | `scripts/berth_token.py create` 或 `POST /tokens` |
+| `BERTH_TOKEN`（环境变量 / 只读配置文件，可逗号分隔多个） | **超级管理员**（独一份） | 跨 user + 宿主级操作（造/删镜像、管 user、签发令牌） |
+| `berth_tokens` 表签发（`POST /tokens`） | 某个 **user** | 只能看到/操作这个 user 的资源 + 全局共享资源（只读） |
 
 **库里只存 token 的 sha256**，明文只在签发时返回一次（跟密码一样）。
 
-### 共享资源（shared=true）
+### user（租户/项目）
 
-公共基础设施（所有项目共用的 mysql / redis）不能被某个项目"锁死"，也不能被 agent 乱删。
-给这类服务打上 `labels: {"shared": "true"}`：
+`user` 是一等公民（`users` 表），**授权判定 = owner 相等**：
 
-| | 带作用域的 token | admin |
-|---|---|---|
-| 看到它 | ✅（拿 host:port 去连） | ✅ |
-| 停 / 删 / 改 | ❌ `403` | ✅ |
+| 资源 | 归属 | 谁能看 | 谁能改 |
+|---|---|---|---|
+| 某个 user 私有 | `owner = <user>` | 该 user + 超管 | 该 user + 超管 |
+| **全局共享**（公共 mysql/redis） | `owner` 为空 | 所有 user | **只有超管** |
+| 别人的 | `owner = 别人` | 看不见（`404`） | — |
+
+- 创建资源时 `owner` **自动取令牌所属的 user**（普通令牌不能把资源建到别人名下）
+- 超级管理员可以显式指定 `owner`；不指定 = 全局共享资源
+- `labels` 只是**元数据**（分组/检索/统计），**不再参与授权判定**
 
 ```bash
-# 管理员把公共库标成共享
-sudo scripts/berth_admin.sh share mysql
-# → labels = {"shared": "true"}
+# 管理员把公共库设为全局共享
+sudo scripts/berth_admin.sh share mysql               # owner 置空
+sudo scripts/berth_admin.sh share mysql --owner acme  # 或划给某个 user
 ```
 
-只有 admin 能创建/标记共享资源（scoped token 标 `shared=true` → `403`）。
+### 令牌的有效期（TTL）
 
-### 作用域（按标签隔离）
-
-签发的 token 可以带**作用域**（复用 labels 机制）：
+签发时给 `ttl`（秒），到期**自动失效**（不用人工吊销）—— 动态 worker 场景必需：
 
 ```json
-{"labels": {"project": "shop"}}
+{"name": "w-1", "user": "shop", "ttl": 3600}
 ```
 
-带这个 token 的调用方：
+### 令牌怎么拿（三种自动获取）
 
-- **只能看到 / 操作** labels 里包含 `project=shop` 的服务、执行、产物
-- **创建**资源时强制打上 `project=shop` 标签（不能建到别的项目去）
-- 作用域外的资源 → `404`（不泄露存在性）
-- 老资源（没有标签的）→ scoped token 看不见（默认拒绝）
+**A. 本地令牌文件**（同机 agent 零配置）—— `BERTH_TOKEN_FILE=/run/berth/token`，
+启动时不存在就自动生成（0600）；agent 读**自己那份**（不是超管的）。
+
+**B. 一次性引导码**（跨机接入）—— `POST /tokens/bootstrap`（见下），换到**受限**令牌。
+
+**C. 客户端封装** —— `scripts/berth_client.py`（自动找 token + 带 header + 支持 TLS）。
 
 ### 自动获取 token
 
@@ -733,7 +737,8 @@ curl -s -X DELETE "localhost:9000/images/redis?force=true"
 |---|---|---|
 | `code` | string | 引导码（`BERTH_TOKEN_FILE` 同目录的 `bootstrap.code`） |
 | `name` | string | 令牌名 |
-| `scope` | object? | 作用域；不给 = 能操作所有服务/执行（但不是 admin） |
+| `user` | string | 令牌归属的 user（不存在会自动建） |
+| `ttl` | int | 有效期（秒），0 = 永不过期 |
 
 返回同 `POST /tokens`（含明文 `token`）。错码 `401`；连续错码 5 次 → `429`。
 
@@ -741,20 +746,23 @@ curl -s -X DELETE "localhost:9000/images/redis?force=true"
 
 列出令牌（**不含明文/哈希**）：id、名字、作用域、创建时间、最近使用时间、吊销时间。
 
-### `POST /tokens`（admin）
+### `POST /tokens`（超级管理员）
 
-签发令牌。
+签发令牌（绑定一个 user）。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `name` | string | 令牌名（审计里显示） |
-| `scope` | object? | 作用域，如 `{"labels": {"project": "shop"}}`；不给 = 能操作所有服务/执行 |
+| `user` | string | 令牌归属的 user（**不存在会自动建**） |
+| `ttl` | int | 有效期（秒），0 = 永不过期 |
 
 ```json
 {
   "id": "tk-712c6e0d01",
   "name": "shakedown-shop",
-  "scope": {"labels": {"project": "shop"}},
+  "user": "shop",
+  "ttl": 3600,
+  "expires_at": "2026-01-01T11:00:00+00:00",
   "created_at": "2026-01-01T10:00:00+00:00",
   "last_used_at": null,
   "revoked_at": null,
@@ -774,6 +782,31 @@ python3 scripts/berth_token.py create --name shakedown-shop --project shop
 python3 scripts/berth_token.py list
 python3 scripts/berth_token.py revoke tk-712c6e0d01
 ```
+
+---
+
+## user（租户/项目）
+
+### `GET /users`（超级管理员）
+
+列出所有 user：名字、id、配额、创建时间、资源数（服务/执行）。
+
+### `POST /users`（超级管理员）
+
+建一个 user。`{name, quota_runs?, quota_memory_mb?, quota_services?, notes?}`
+（配额 `0` = 不限）。**令牌引用不存在的 user 时会自动建。**
+
+### `GET /users/{name}` / `GET /users/{name}/resources`
+
+user 详情 / 名下资源汇总。本人或超管可读。
+
+### `PATCH /users/{name}`（超级管理员）
+
+改配额：`{"quota_runs": 10, "quota_services": 5}`
+
+### `DELETE /users/{name}`（超级管理员）
+
+删 user 记录。**它名下的服务/执行不会被自动删**（要自己清），避免误删一整套环境。
 
 ---
 

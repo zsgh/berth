@@ -193,18 +193,22 @@ daemon 启动时 `recover_services()`：对每条 `running` 记录 `systemctl is
 ```sql
 runs(task_id PK, code, stdout, stderr, exit_code, duration_ms, artifacts JSON,
      created_at, finished_at,
-     status, image, network JSON, labels JSON, timeout, started_at, updated_at)
+     status, image, network JSON, labels JSON, timeout, started_at, updated_at,
+     owner TEXT)              -- 归属的 user
                                    -- 脚本执行历史 + 异步执行状态
 services(service_id PK, name, template, unit, host, port, internal_port,
          status, dir, persist, created_at, updated_at,
+         owner TEXT,             -- 归属的 user；NULL = 全局共享资源
          labels JSON, overrides JSON, spec JSON,
          init_spec JSON, init_result JSON, network JSON, task_id)
                                    -- 服务元数据（spec 存生效模板，重启靠它）
 ports(service_id PK, internal_port, external_port UNIQUE, allocated_at) -- 端口分配
 events(id PK, ts, actor, action, target, method, path, status, detail JSON)
                                    -- 操作审计
-berth_tokens(id PK, name, token_hash UNIQUE, scope JSON,
+berth_tokens(id PK, name, token_hash UNIQUE, user, ttl, expires_at,
              created_at, last_used_at, revoked_at)   -- 访问令牌（只存 sha256）
+users(id PK, name UNIQUE, netns, cidr, uid,       -- user（租户/项目）
+      quota_runs, quota_memory_mb, quota_services, created_at, notes)
 image_builds(id PK, name, status, spec JSON, log, image_path, error,
              created_at, finished_at)               -- 镜像构建记录
 ```
@@ -372,38 +376,57 @@ berth 是**单租户自托管**的沙箱服务，调用方是自己可控的 age
 
 所以复杂度预算花在**隔离**（作用域）上，而不是**轮换**（刷新流）上。
 
-### 14.2 两种身份
+### 14.2 user 是一等公民
+
+隔离实体叫 **user**（= 租户/项目/团队，≠ OS 用户；OS 那个叫 sandbox uid）。
+为什么不用"标签域"当边界：
+
+| 标签当边界的问题 | 例子 |
+|---|---|
+| 标签拼错就失效 | `project=shop `（多空格）→ 用户看不见自己的资源 |
+| 多标签组合歧义 | scope `{task:42}` 能碰 `{project:other, task:42}` → 跨 user 泄漏 |
+| 同名即同域 | 两个团队都叫 `project=shop` → 互相可见可删 |
+| 标签可被调用方改 | 改一下标签就可能"逃出"自己的域 |
+
+所以：**标签只做元数据**（分组/检索/统计），授权判定用 **owner 相等**。
+
+```
+users(id, name UNIQUE, netns, cidr, uid,          ← Phase B/C 的隔离载体
+      quota_runs, quota_memory_mb, quota_services,
+      created_at, notes)
+services(..., owner TEXT)   -- users.name；owner IS NULL = 全局共享资源
+runs(..., owner TEXT)
+berth_tokens(id, name, token_hash UNIQUE, user, ttl, expires_at, ...)
+```
+
+| 资源 | 归属 | 谁能看 | 谁能改 |
+|---|---|---|---|
+| user 私有 | `owner = <user>` | 该 user + 超管 | 该 user + 超管 |
+| 全局共享（公共 mysql/redis） | `owner` 为空 | 所有 user | **只有超管** |
+| 别人的 | `owner = 别人` | 看不见（`404`） | — |
+
+创建资源时 `owner` **自动取令牌所属的 user**（普通令牌不能把资源建到别人名下）；
+超管可显式指定，不指定 = 全局共享。
+
+### 14.3 两种身份
 
 | 来源 | 身份 | 能做什么 |
 |---|---|---|
-| `BERTH_TOKEN`（环境变量，逗号分隔多个） | **admin** | 全部 + 宿主级操作（造/删镜像、签发令牌） |
-| `berth_tokens` 表（`POST /tokens` 签发） | **非 admin** | 能看能改服务/执行/产物；带 scope 时只看得到自己那域 |
+| `BERTH_TOKEN`（环境变量 / 只读配置文件，逗号分隔多个） | **超级管理员**（独一份） | 跨 user + 宿主级操作（造/删镜像、管 user、签发令牌） |
+| `berth_tokens` 表签发 | 某个 **user** | 只能看到/操作这个 user 的资源 + 全局共享资源（只读） |
 
 **库里只存 sha256**，明文只在签发时返回一次（跟密码一样）。
-审计里的 actor 是 `admin:env` 或 `token:<短id>`，不落明文。
+审计里的 actor 是 `admin:env` / `admin:local` / `user:<name>`，不落明文。
 
-**admin 只属于环境变量里的凭证**：库里签发的 token 哪怕没给 scope，也只是"工作令牌"
-（能操作所有服务/执行），碰不到宿主级操作。这样"agent 拿到的 token"和"你的控制面凭证"
-天然分开了。
+**超级管理员独一份**：平台自己不算 user；平台持超级管理员令牌（跨 user 操作），
+要"以某个 user 的身份"操作就用那个 user 的令牌。
 
-### 14.3 作用域 = 标签域
+**TTL**：令牌可带有效期（秒），到期自动失效 —— 动态 worker 场景必需
+（worker 数量不定、生命周期短，人工签发/吊销跟不上）。
 
-复用 B12 的 labels 机制，不另造一套资源树：
-
-```json
-{"labels": {"project": "shop"}}
-```
-
-带这个 token 的调用方：
-
-- 只能看到 / 操作 labels **包含** `project=shop` 的服务、执行、产物
-- 创建资源时**强制**打上作用域标签（`{"project":"evil"}` 会被改写成 `{"project":"shop"}`）
-- 作用域外的资源 → **404**（不是 403 —— 不泄露存在性）
-- 没有标签的老资源 → scoped token 看不见（默认拒绝）
-
-**一个容易漏的攻击面**：scoped token 往**别人项目的 task_id** 里上传文件 = 植入待执行代码
-（对方下次跑 pytest 就执行了）。所以上传时会给 task 建一条带作用域标签的**占位记录**
-（`status=pending`），把 task 圈进调用方的域；之后别的 token 再写同一个 task → 404。
+**一个容易漏的攻击面**：某个 user 的令牌往**别的 user 的 task_id** 里上传文件 = 植入待执行代码
+（对方下次跑 pytest 就执行了）。所以上传时会给 task 建一条带 owner 的**占位记录**
+（`status=pending`），把 task 圈进调用方的域；之后别的令牌再写同一个 task → 404。
 
 ### 14.4 轮换（零停机）
 
