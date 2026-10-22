@@ -114,6 +114,30 @@ def main():
     except ValueError:
         print("✔ 老记录占用也拒绝删除")
 
+    print("=== 占用中 + force：先停服务再删 ===")
+    # force 会去停服务（真机要 systemd），这里替换掉 stop_service 只验证调用顺序
+    calls = []
+    import sandbox.service as service_mod
+
+    orig_stop = service_mod.stop_service
+
+    def fake_stop(ref):
+        calls.append(ref)
+        return {"service_id": ref, "status": "stopped"}
+
+    service_mod.stop_service = fake_stop
+    try:
+        result = images.delete_image("redis", force=True)
+    finally:
+        service_mod.stop_service = orig_stop
+    print("  停掉了:", calls)
+    print("  返回:", {k: result[k] for k in ("name", "deleted", "stopped_services")})
+    assert calls, "force=True 应该先停占用者"
+    assert result["stopped_services"], result
+    assert result["deleted"] is True
+    # 目录真没了
+    assert not (FAKE_OPT / "rootfs-redis").exists(), "目录应该被删掉"
+
     print("=== 制作镜像：默认关闭（宿主 root 级操作）===")
     os.environ.pop("BERTH_ALLOW_IMAGE_BUILD", None)
     try:

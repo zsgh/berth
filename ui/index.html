@@ -440,9 +440,11 @@
                 <td x-text="human(i.size_bytes)"></td>
                 <td class="small"><template x-for="s in (i.in_use_by || [])" :key="s"><span class="tag" x-text="s"></span></template></td>
                 <td class="row-actions">
-                  <button class="ghost sm" x-show="i.deletable && images.canDelete" @click="images.remove(i)">删除</button>
+                  <button class="ghost sm" x-show="i.deletable && images.canDelete && !(i.in_use_by || []).length"
+                          @click="images.remove(i)">删除</button>
+                  <button class="ghost sm" x-show="i.deletable && images.canDelete && (i.in_use_by || []).length"
+                          @click="images.remove(i)">停用并删除</button>
                   <span class="muted small" x-show="i.is_base">基础镜像</span>
-                  <span class="muted small" x-show="!i.deletable && !i.is_base">占用中</span>
                 </td>
               </tr>
             </template>

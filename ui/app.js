@@ -475,15 +475,24 @@ function shell() {
         } catch (e) { say(String(e.message || e), 'err'); }
       },
       async remove(img) {
+        const users = img.in_use_by || [];
+        const busy = users.length > 0;
         const ok = await askConfirm({
           title: '删除镜像 ' + img.name,
-          message: '会删除目录 ' + img.path + '（不可恢复）。用这个镜像的服务要先停掉/删掉。',
-          name: img.name, okText: '删除',
+          message: busy
+            ? '镜像正被 ' + users.join('、') + ' 使用。确认后会先停止这些服务'
+              + '（保留服务记录和数据卷），再删除镜像目录 ' + img.path + '。'
+            : '会删除目录 ' + img.path + '（不可恢复）。',
+          name: img.name, okText: busy ? '停止并删除' : '删除',
         });
         if (!ok) return;
         try {
-          await api('/images/' + encodeURIComponent(img.name), { method: 'DELETE' });
-          say('已删除镜像 ' + img.name);
+          const r = await api(
+            '/images/' + encodeURIComponent(img.name) + (busy ? '?force=true' : ''),
+            { method: 'DELETE' },
+          );
+          const stopped = r && r.stopped_services ? r.stopped_services : [];
+          say('已删除镜像 ' + img.name + (stopped.length ? '（已停止：' + stopped.join('、') + '）' : ''));
         } catch (e) { say(String(e.message || e), 'err'); }
         await this.load();
       },

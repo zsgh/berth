@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -205,10 +206,38 @@ def mounted_image_dirs() -> list[str]:
     return out
 
 
-def delete_image(name: str) -> dict:
+def services_using_image(path: Path) -> list[dict]:
+    """哪些服务在用这个镜像目录（按**解析后的路径**比较，不只按名字）。
+
+    名字可能对不上（images.yaml 里叫别的名、或者老记录只有 template 字段），
+    所以统一解析成路径再比。
+    """
+    from state.db import list_service_rows
+
+    try:
+        target = Path(path).resolve()
+    except OSError:
+        target = Path(path)
+
+    out: list[dict] = []
+    for row in list_service_rows():
+        image = _service_image(row)
+        if not image:
+            continue
+        try:
+            if resolve_image(image).resolve() == target:
+                out.append(row)
+        except (ValueError, OSError):
+            continue
+    return out
+
+
+def delete_image(name: str, force: bool = False) -> dict:
     """删除一个镜像（只删 berth 自己管的 rootfs-* 目录）。
 
     拒绝：base 镜像、正在被服务使用的镜像、正在构建中的镜像。
+
+    force=True：先把占用它的服务**停掉**（保留服务记录和数据卷），再删镜像。
     """
     from sandbox import config
 
@@ -234,22 +263,42 @@ def delete_image(name: str) -> dict:
     if resolved.parent != root or not resolved.name.startswith(Path(ROOTFS).name + "-"):
         raise ValueError(f"拒绝删除越界路径: {resolved}")
 
-    in_use = images_in_use()
-    if name in in_use:
-        raise ValueError(
-            f"镜像 {name!r} 正被使用（{', '.join(in_use[name])}）："
-            f"先删掉这些服务，或把它们换成别的镜像"
-        )
-    # 路径级兜底：内核里还挂着这个目录（overlay lowerdir）就不许删
-    resolved = path.resolve()
-    for mounted in mounted_image_dirs():
-        try:
-            if Path(mounted).resolve() == resolved:
+    stopped: list[str] = []
+    users = services_using_image(path)
+    if users:
+        if not force:
+            names = ", ".join(str(u.get("name") or u.get("service_id")) for u in users)
+            raise ValueError(
+                f"镜像 {name!r} 正被服务使用（{names}）："
+                f"加 force=true 会先停止这些服务（保留记录和数据卷）再删除"
+            )
+        # force：先停掉占用者（停，不删 —— 记录和数据卷都留着）
+        from sandbox.service import stop_service
+
+        for row in users:
+            svc_id = str(row.get("service_id"))
+            try:
+                stop_service(svc_id)
+                stopped.append(str(row.get("name") or svc_id))
+            except Exception as e:
                 raise ValueError(
-                    f"镜像 {name!r} 正被内核挂载引用（{mounted}）：有服务在用，先停掉"
-                )
-        except OSError:
-            continue
+                    f"停止占用服务 {svc_id} 失败：{e}（已停止: {stopped or '无'}）"
+                ) from e
+
+    # 内核里还挂着这个目录（overlay lowerdir）就不许删
+    # 刚停掉服务的话，卸载可能慢一点，等一下
+    for _ in range(15):
+        mounted = [
+            m for m in mounted_image_dirs()
+            if _same_path(m, resolved)
+        ]
+        if not mounted:
+            break
+        time.sleep(0.2)
+    else:
+        raise ValueError(
+            f"镜像 {name!r} 仍被内核挂载引用（{mounted[0]}）：有进程还在用，先停掉"
+        )
 
     from state.db import list_image_builds
 
@@ -259,7 +308,20 @@ def delete_image(name: str) -> dict:
 
     size = dir_size(path)
     _rm_rf(path)
-    return {"name": name, "path": str(path), "deleted": True, "size_bytes": size}
+    return {
+        "name": name,
+        "path": str(path),
+        "deleted": True,
+        "size_bytes": size,
+        "stopped_services": stopped,
+    }
+
+
+def _same_path(a, b) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return str(a) == str(b)
 
 
 def _rm_rf(path: Path) -> None:

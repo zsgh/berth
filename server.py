@@ -746,8 +746,9 @@ def images_list() -> list[dict]:
                 "path": path,
                 # 目录实际占用（du -sb）；不能用 shutil.disk_usage —— 那是整个盘的用量
                 "size_bytes": dir_size(path),
-                "managed": name in managed,          # 是否归 berth 管（可删）
-                "deletable": name in managed and name not in in_use,
+                "managed": name in managed,          # 是否归 berth 管（rootfs-* 目录）
+                # 可删（被占用时需要 force=true：先停服务再删）
+                "deletable": name in managed,
                 "in_use_by": in_use.get(name, []),   # 哪些服务在用
                 "is_base": path == str(Path(ROOTFS)),
             }
@@ -799,15 +800,18 @@ def images_build_get(build_id: str) -> dict:
 
 
 @api.delete("/images/{name}")
-def images_delete(name: str) -> dict:
+def images_delete(name: str, force: bool = Query(False, description="占用中时先停掉服务再删")) -> dict:
     """**删除**一个镜像（只删 berth 自己管的 rootfs-* 目录）。
 
-    拒绝：base 镜像、正被服务使用的镜像、构建中的镜像。
+    - `base` 镜像：拒绝
+    - 正被服务使用：默认 `409`（提示是哪些服务在用）；
+      `?force=true` 则**先停掉这些服务**（保留服务记录和数据卷）再删
+    - 正被内核挂载引用：拒绝（停完还挂着说明有别的进程在用）
     """
     from sandbox.images import delete_image
 
     try:
-        return delete_image(name)
+        return delete_image(name, force=force)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
