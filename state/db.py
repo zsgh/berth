@@ -54,6 +54,11 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "network": "TEXT",                      # JSON：网络策略
         "task_id": "TEXT",                      # 关联的任务（共享 workspace）
     },
+    "berth_tokens": {
+        "user": "TEXT",                         # 归属的 user（= 租户/项目）
+        "ttl": "INTEGER DEFAULT 0",            # 有效期（秒），0 = 永不过期
+        "expires_at": "TEXT",                  # 到期时间
+    },
 }
 
 
