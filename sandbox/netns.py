@@ -474,11 +474,22 @@ def exec_prefix(user: str | None) -> list[str]:
 
 
 def netns_for_user(user: str | None) -> str | None:
-    """user 的 netns 名（没建 / 没启用 → None）。"""
+    """user 的 netns 名（没有就建一个；没启用 → None）。
+
+    注意：不能"没有就算了"—— 那样只跑脚本不建服务的 user 会**退回 host 网络**，
+    隔离就没了。所以这里按需创建。
+    """
     if not enabled() or not user:
         return None
     ns = netns_name(user)
-    return ns if _netns_exists(ns) else None
+    if _netns_exists(ns):
+        return ns
+    try:
+        info = ensure_netns(user)
+        return info.get("netns")
+    except Exception as e:
+        log.warning("准备 user %s 的 netns 失败（退回 host 网络）: %s", user, e)
+        return None
 
 
 def service_host(user: str | None) -> str:
