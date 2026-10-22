@@ -119,6 +119,49 @@ limactl shell lima -- sudo systemctl restart berth
 
 更顺的方式：直接用 VS Code Remote-SSH 连进 VM 开发，或像现在这样在 VM 里跑 agent/编辑器。
 
+## 手工部署的 daemon 怎么重启
+
+没走 `macos-bootstrap.sh`、而是自己 `nohup` 起的 daemon（VM 重启后要手动拉起）：
+
+```bash
+# 停
+limactl shell <vm> -- 'pkill -f "[s]erver:app"'     # 注意用 [s] 免得 pkill 匹配到自己
+
+# 起
+limactl shell <vm> -- bash -lc '
+  cd ~/stage3/berth
+  setsid nohup .venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 9000 \
+    > /tmp/berth.log 2>&1 < /dev/null &
+'
+limactl shell <vm> -- 'tail -20 /tmp/berth.log'      # 看启动日志
+```
+
+数据不会因为进程重启而丢：SQLite（执行历史 / 服务记录 / 端口 / 标签）、`/workspace` 产物、
+服务数据卷都在磁盘上（`/var/lib/berth`），daemon 起来后 `recover_services()` 会把
+还在跑的 systemd 服务重新认领（`systemd-run --collect` 建的临时单元不持久，
+VM 重启后服务进程会没，但数据还在，用 `POST /services/{name}/start` 能带数据拉起）。
+
+嫌麻烦就注册成 systemd 单元（开机自启 + 崩了自动拉起）：
+
+```bash
+limactl shell <vm> -- bash -lc '
+  V=$HOME/stage3/berth
+  sudo tee /etc/systemd/system/berth.service >/dev/null <<UNIT
+[Unit]
+Description=berth sandbox daemon
+After=network.target
+[Service]
+WorkingDirectory=$V
+ExecStart=$V/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 9000
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload && sudo systemctl enable --now berth
+'
+```
+
 ## 已有 Linux 环境？
 
 **这个脚本不需要参与**。berth 就是个 HTTP 服务，在哪台 Linux 上跑都一样：
