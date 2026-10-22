@@ -470,11 +470,95 @@ curl -s -X DELETE localhost:9000/volumes/svc-652bafb3
 
 ### `GET /images`
 
-已发现的镜像（只读）。
+已发现的镜像 + 管理信息。
 
 ```json
-[{"name": "base", "path": "/opt/berth/rootfs", "size_bytes": 314572800}]
+[
+  {
+    "name": "base",
+    "path": "/opt/berth/rootfs",
+    "size_bytes": 381866176,
+    "managed": false,          // 是否归 berth 管（rootfs-* 目录）→ 才允许删
+    "deletable": false,        // 现在能不能删
+    "in_use_by": [],           // 哪些服务在用
+    "is_base": true            // 是不是基础镜像
+  }
+]
 ```
+
+`size_bytes` 是目录实际占用（`du -sb`），不是文件系统余量。
+
+### `POST /images` — 制作镜像
+
+从已有镜像复制一份，装上东西，生成新的 `rootfs-<name>`。
+
+**这是宿主 root 级操作**（chroot + apt 的 maintainer script 以 root 跑），默认关闭：
+要设 `BERTH_ALLOW_IMAGE_BUILD=1` 并重启 daemon，否则返回 `403`。
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `name` | string | ✔ | 镜像名（`^[a-z0-9][a-z0-9._-]{0,31}$`） |
+| `base` | string | `base` | 从哪个镜像复制 |
+| `packages` | string[] | - | apt 安装的包 |
+| `pip_packages` | string[] | - | pip 安装的包 |
+| `commands` | string[] | - | 在 chroot 里执行的命令（每条一行） |
+| `force` | bool | false | 目标已存在时重建 |
+
+```bash
+curl -s -X POST localhost:9000/images -H 'Content-Type: application/json' \
+  -d '{"name":"myimg","base":"base","packages":["jq"],"pip_packages":["httpx==0.27"]}'
+```
+
+```json
+{
+  "build_id": "img-c7cb82c7",
+  "name": "myimg",
+  "status": "building",
+  "spec": {"name": "myimg", "base": "base", "source": "/opt/berth/rootfs", "target": "/opt/berth/rootfs-myimg", "packages": ["jq"]}
+}
+```
+
+构建在后台跑（`202 Accepted`），进度查 `GET /images/builds/{build_id}`。
+构建过程跑在 mount/pid/uts/ipc namespace 里：装的包起的后台进程不会漏到宿主。
+
+### `GET /images/builds` / `GET /images/builds/{build_id}`
+
+构建记录列表 / 单个构建的状态 + 输出日志。
+
+```json
+{
+  "id": "img-c7cb82c7",
+  "name": "myimg",
+  "status": "success",
+  "spec": {"packages": ["jq"]},
+  "log": "[1/6] 复制 ...\n[6/6] 完成: /opt/berth/rootfs-myimg（202M）",
+  "image_path": "/opt/berth/rootfs-myimg",
+  "error": null,
+  "created_at": "2026-01-01T10:00:00+00:00",
+  "finished_at": "2026-01-01T10:02:31+00:00"
+}
+```
+
+`status`：`building` / `success` / `failed`。
+
+### `DELETE /images/{name}`
+
+删除一个镜像（只删 berth 自己管的 `rootfs-*` 目录）。
+
+拒绝（`409`）的情况：
+
+- `base` 镜像（其它镜像都基于它）
+- 不在受管范围内（`images.yaml` 指向别处的镜像）
+- **正被服务使用**（含 0.3.0 之前创建的老记录 —— 那种记录没有 `spec` 列，会回退到模板的 `image` 字段）
+- **正被内核挂载引用**（扫 `/proc/self/mountinfo` 的 overlay `lowerdir`）—— 硬保护
+- 正在构建中
+
+```bash
+curl -s -X DELETE localhost:9000/images/myimg
+# {"name":"myimg","path":"/opt/berth/rootfs-myimg","deleted":true,"size_bytes":193694064}
+```
+
+删除用 `BERTH_ALLOW_IMAGE_DELETE`（默认 `1`）控制。
 
 ### `GET /templates` / `GET /templates/{name}`
 

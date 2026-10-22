@@ -111,7 +111,7 @@ def main():
     try:
         images.delete_image("redis")
         raise AssertionError("老记录占用的镜像不该能删")
-    except ValueError as e:
+    except ValueError:
         print("✔ 老记录占用也拒绝删除")
 
     print("=== 制作镜像：默认关闭（宿主 root 级操作）===")

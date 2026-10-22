@@ -197,6 +197,27 @@ open http://localhost:9000/ui/
 | `docker logs` | `GET /services/{name}/logs` |
 | `docker network`（限制出网） | `{"network": {"mode": "none" \| "allow", "allow": [...]}}` |
 
+## 镜像管理
+
+镜像 = 一个普通目录（overlayfs 的只读下层）。除了 `scripts/setup_rootfs.sh` 批量构建，
+也可以在 UI 或 API 上按需制作 / 删除。
+
+```bash
+# 制作（后台跑，返回 build_id）
+curl -s -X POST localhost:9000/images -H 'Content-Type: application/json' \
+  -d '{"name":"myimg","base":"base","packages":["jq"],"pip_packages":["httpx==0.27"]}'
+
+curl -s localhost:9000/images/builds/<build_id>      # 看进度和日志
+
+# 删除（只删 berth 自己管的 rootfs-* 目录；base / 使用中 / 内核挂载中的会被拒）
+curl -s -X DELETE localhost:9000/images/myimg
+```
+
+> **制作镜像是宿主 root 级操作**（chroot + apt 的 maintainer script 以 root 跑），
+> 所以默认关闭：要设 `BERTH_ALLOW_IMAGE_BUILD=1` 再重启 daemon。
+> 构建在 mount/pid/uts/ipc namespace 里跑，装的包起的后台进程不会漏到宿主。
+> 删除会拒绝：base 镜像、正被服务用的（含老记录）、正被内核 overlay 挂载引用的。
+
 ## 服务模板（templates/*.yaml）
 
 模板 ≈ 「`docker run` 的固定参数模板」，字段语义与 Kubernetes 对齐：
@@ -235,6 +256,8 @@ open http://localhost:9000/ui/
 | `BERTH_MAX_CPU_PERCENT` | `400` | CPU 配额上限（100 = 1 核） |
 | `BERTH_MAX_PROCESSES` | `512` | 进程数上限（cgroup TasksMax） |
 | `BERTH_MOUNT_ROOTS` | `/srv/berth-mounts` | 只读挂载允许的宿主目录（冒号分隔） |
+| `BERTH_ALLOW_IMAGE_BUILD` | `0` | 允许**制作**镜像（宿主 root 级操作，默认关） |
+| `BERTH_ALLOW_IMAGE_DELETE` | `1` | 允许**删除**镜像 |
 | `BERTH_UI_ENABLED` | `1` | 是否托管 `/ui` 管理界面 |
 | `BERTH_TRACING` | `1` | `0` 关闭 OpenTelemetry 上报；端点不可达时自动跳过 |
 | `BERTH_PHOENIX_ENDPOINT` | `http://localhost:6006/v1/traces` | OTLP 收集端点 |
@@ -304,6 +327,7 @@ python3 tests/test_files.py          # B3 文件上传下载 / 路径穿越 / �
 python3 tests/test_labels.py         # B12 标签过滤 / 状态流转 / 审计
 python3 tests/test_service_spec.py   # B5/B10/B11 overrides / spec / 模板校验
 python3 tests/test_api.py            # HTTP 层（鉴权 / 上传下载 / 标签 / 孤儿卷 / UI 资源）
+python3 tests/test_image_mgmt.py      # 镜像管理（制作 / 删除 / 占用保护）
 
 scripts/smoke_services.sh           # 起 redis → 外部连上 → 停止
 scripts/smoke_persistence.sh        # kill daemon → 重启 → 状态恢复 + 孤儿清理
