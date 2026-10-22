@@ -203,6 +203,10 @@ services(service_id PK, name, template, unit, host, port, internal_port,
 ports(service_id PK, internal_port, external_port UNIQUE, allocated_at) -- 端口分配
 events(id PK, ts, actor, action, target, method, path, status, detail JSON)
                                    -- 操作审计
+berth_tokens(id PK, name, token_hash UNIQUE, scope JSON,
+             created_at, last_used_at, revoked_at)   -- 访问令牌（只存 sha256）
+image_builds(id PK, name, status, spec JSON, log, image_path, error,
+             created_at, finished_at)               -- 镜像构建记录
 ```
 
 - WAL 模式 + 每次操作独立连接（uvicorn 多线程安全）
@@ -352,7 +356,80 @@ init 的结果（exit code / stdout / stderr / 耗时 / 执行时间）存在服
 - `action`：`METHOD /path`，`target`：服务名 / task_id
 - 审计失败不影响主流程（try/except 吞掉）
 
-## 14. UI 架构
+## 14. 令牌与作用域
+
+### 14.1 为什么不是 OAuth / JWT
+
+berth 是**单租户自托管**的沙箱服务，调用方是自己可控的 agent（Shakedown 等）。
+业界那套复杂的令牌机制是为别的场景设计的：
+
+| 机制 | 为谁设计 | berth 要不要 |
+|---|---|---|
+| OAuth 刷新令牌 | 第三方应用代用户操作账号 | ❌ 调用方是自己人 |
+| 短时效 token（分钟级） | 公网多租户，密钥暴露面大 | ❌ 没有轮换基础设施，只会成为天天要续的负担 |
+| mTLS / 请求签名 | 客户端不可信，要防篡改 | ❌ 客户端要实现签名逻辑 |
+| **静态 token + 作用域** | 单租户自托管 | ✅ |
+
+所以复杂度预算花在**隔离**（作用域）上，而不是**轮换**（刷新流）上。
+
+### 14.2 两种身份
+
+| 来源 | 身份 | 能做什么 |
+|---|---|---|
+| `BERTH_TOKEN`（环境变量，逗号分隔多个） | **admin** | 全部 + 宿主级操作（造/删镜像、签发令牌） |
+| `berth_tokens` 表（`POST /tokens` 签发） | **非 admin** | 能看能改服务/执行/产物；带 scope 时只看得到自己那域 |
+
+**库里只存 sha256**，明文只在签发时返回一次（跟密码一样）。
+审计里的 actor 是 `admin:env` 或 `token:<短id>`，不落明文。
+
+**admin 只属于环境变量里的凭证**：库里签发的 token 哪怕没给 scope，也只是"工作令牌"
+（能操作所有服务/执行），碰不到宿主级操作。这样"agent 拿到的 token"和"你的控制面凭证"
+天然分开了。
+
+### 14.3 作用域 = 标签域
+
+复用 B12 的 labels 机制，不另造一套资源树：
+
+```json
+{"labels": {"project": "shop"}}
+```
+
+带这个 token 的调用方：
+
+- 只能看到 / 操作 labels **包含** `project=shop` 的服务、执行、产物
+- 创建资源时**强制**打上作用域标签（`{"project":"evil"}` 会被改写成 `{"project":"shop"}`）
+- 作用域外的资源 → **404**（不是 403 —— 不泄露存在性）
+- 没有标签的老资源 → scoped token 看不见（默认拒绝）
+
+**一个容易漏的攻击面**：scoped token 往**别人项目的 task_id** 里上传文件 = 植入待执行代码
+（对方下次跑 pytest 就执行了）。所以上传时会给 task 建一条带作用域标签的**占位记录**
+（`status=pending`），把 task 圈进调用方的域；之后别的 token 再写同一个 task → 404。
+
+### 14.4 轮换（零停机）
+
+`BERTH_TOKEN` 支持逗号分隔多个 → 换的时候先加新的：
+
+```
+BERTH_TOKEN=旧的,新的   →  重启 berth  →  调用方切到新的  →  验证通过  →  摘掉旧的
+```
+
+库里签发的 token 直接 `DELETE /tokens/{id}` 吊销，立刻生效。
+（思路同 SSH `authorized_keys` / docker login —— 静态凭证 + 手动轮换，不搞刷新流。）
+
+### 14.5 沙箱能不能拿到 token
+
+不能，已验证：
+
+- pivot_root 之后沙箱的 `/` 是 overlay 合成根，**宿主的 /etc 完全看不见**
+  （沙箱里 `/etc/systemd/system` 是空的，宿主那边有 dbus/sshd/lima-guestagent）
+- PID namespace 隔离 → 沙箱看不到 daemon 的命令行（`/proc/1` 是沙箱自己的 init）
+- 环境变量不继承（沙箱里没有 `BERTH_*` / `*TOKEN*`）
+
+所以 token 放在宿主上（systemd unit / 0600 的 env 文件）是安全的。
+**唯一要管的是宿主上的文件权限** —— 沙箱以 uid 1000 运行，宿主上 uid 1000 的真实用户
+能读任何 world-readable 的文件，所以放 token 的文件要 `chmod 600 root:root`。
+
+## 15. UI 架构
 
 - 静态页挂在 FastAPI 的 `StaticFiles`（`/ui`），**不新增进程、不引入 Node 构建链**
 - 前端：Alpine.js（vendored 在 `ui/vendor/alpine.min.js`，不依赖 CDN）
