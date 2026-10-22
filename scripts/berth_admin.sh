@@ -171,6 +171,7 @@ cmd_tls() {
 
   say "1/3 生成自签证书"
   mkdir -p "$TLS_DIR"
+  rm -f "$TLS_DIR/tls.off"       # 标记：TLS 要开
   # 目录要能被 daemon 用户穿过（否则读不到证书）
   chmod 755 "$TLS_DIR"
   openssl req -x509 -newkey rsa:2048 -nodes \
@@ -208,7 +209,8 @@ cmd_tls() {
 cmd_tls_off() {
   need_root tls-off
   say "从 systemd 单元里去掉 --ssl-* 并重启"
-  rm -f "$TLS_DIR/tls.off" 2>/dev/null || true
+  mkdir -p "$TLS_DIR"; chmod 755 "$TLS_DIR"
+  touch "$TLS_DIR/tls.off"      # 标记：TLS 关着（tls 命令会把它删掉）
   write_unit
   systemctl restart "$SVC"
   sleep 3
