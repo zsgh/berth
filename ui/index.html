@@ -52,6 +52,8 @@
       <div class="status-dot" :class="healthClass"></div>
       <span x-text="healthText"></span>
       <div class="spacer"></div>
+      <span class="muted small" x-show="!isAdmin"
+            title="user / 访问令牌 / 镜像管理需要超级管理员令牌">受限令牌（部分页面不可见）</span>
       <span class="muted small" x-show="route.name==='services' && serviceCount" x-text="serviceCount + ' 个活跃服务'"></span>
       <span class="muted small" x-show="route.name==='runs' && runCount" x-text="runCount + ' 条执行记录'"></span>
     </header>
