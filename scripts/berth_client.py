@@ -19,7 +19,7 @@ token 的查找顺序：
     1) 显式传入的 token
     2) 环境变量 `BERTH_TOKEN`
     3) 环境变量 `BERTH_TOKEN_FILE` 指向的文件
-    4) 同机默认路径：/run/berth/token、~/.berth/token
+    4) 同机默认路径：$BERTH_HOME/token、/run/berth/token、~/.berth/token
 """
 from __future__ import annotations
 
@@ -32,12 +32,15 @@ from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:9000"
 
-# 同机时可能存在的本地令牌文件
-DEFAULT_TOKEN_FILES = (
-    "/run/berth/token",
-    "/var/run/berth/token",
-    str(Path.home() / ".berth" / "token"),
-)
+def _default_token_files() -> list[str]:
+    """同机时可能存在的本地令牌文件（按优先级）。"""
+    home = os.environ.get("BERTH_HOME") or "/var/lib/berth"
+    return [
+        f"{home}/token",                    # BERTH_TOKEN_FILE 常见的落点
+        "/run/berth/token",
+        "/var/run/berth/token",
+        str(Path.home() / ".berth" / "token"),
+    ]
 
 
 def find_token(explicit: str | None = None) -> str | None:
@@ -49,7 +52,7 @@ def find_token(explicit: str | None = None) -> str | None:
         # 可能是逗号分隔的多个 → 用第一个
         return env.replace(",", " ").split()[0]
     path = (os.environ.get("BERTH_TOKEN_FILE") or "").strip()
-    candidates = [path] if path else list(DEFAULT_TOKEN_FILES)
+    candidates = [path] if path else _default_token_files()
     for candidate in candidates:
         if not candidate:
             continue
