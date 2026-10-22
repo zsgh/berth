@@ -170,14 +170,17 @@ cmd_tls() {
 
   say "1/3 生成自签证书"
   mkdir -p "$TLS_DIR"
-  chmod 700 "$TLS_DIR"
+  # 目录要能被 daemon 用户穿过（否则读不到证书）
+  chmod 755 "$TLS_DIR"
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$TLS_KEY" -out "$TLS_CRT" -days 3650 \
     -subj "/CN=berth" \
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1
-  chmod 600 "$TLS_KEY"
+  # 私钥：root 拥有 + daemon 所在组可读（daemon 不是 root 跑的）
+  chown root:"$(id -gn "$RUN_USER")" "$TLS_KEY" 2>/dev/null || chown root:root "$TLS_KEY"
+  chmod 640 "$TLS_KEY"
   chmod 644 "$TLS_CRT"
-  info "$TLS_CRT / $TLS_KEY"
+  info "$TLS_CRT（公开）/ $TLS_KEY（640，root + daemon 组）"
 
   say "2/3 写进 systemd 单元并重启"
   write_unit
