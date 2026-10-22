@@ -449,7 +449,45 @@ function shell() {
       },
     },
 
-    images: { rows: [], async load() { this.rows = await api('/images'); } },
+    images: {
+      rows: [], builds: [], buildOpen: false, canBuild: false, canDelete: true,
+      form: { name: '', base: 'base', packages: '', pip: '', commands: '', force: false },
+      async load() {
+        this.rows = await api('/images');
+        try { this.builds = await api('/images/builds'); } catch (e) { this.builds = []; }
+      },
+      async submitBuild() {
+        const f = this.form;
+        if (!f.name.trim()) return say('请填镜像名', 'err');
+        const body = {
+          name: f.name.trim(),
+          base: f.base,
+          packages: f.packages.split(/[\s,]+/).filter(Boolean),
+          pip_packages: f.pip.split(/[\s,]+/).filter(Boolean),
+          commands: f.commands.split('\n').map((x) => x.trim()).filter(Boolean),
+          force: !!f.force,
+        };
+        try {
+          const r = await api('/images', { method: 'POST', json: body });
+          say('开始制作镜像：' + r.name + '（' + r.build_id + '）');
+          this.buildOpen = false;
+          await this.load();
+        } catch (e) { say(String(e.message || e), 'err'); }
+      },
+      async remove(img) {
+        const ok = await askConfirm({
+          title: '删除镜像 ' + img.name,
+          message: '会删除目录 ' + img.path + '（不可恢复）。用这个镜像的服务要先停掉/删掉。',
+          name: img.name, okText: '删除',
+        });
+        if (!ok) return;
+        try {
+          await api('/images/' + encodeURIComponent(img.name), { method: 'DELETE' });
+          say('已删除镜像 ' + img.name);
+        } catch (e) { say(String(e.message || e), 'err'); }
+        await this.load();
+      },
+    },
 
     templates: {
       names: [], text: '', current: '', error: '',
@@ -576,6 +614,9 @@ function shell() {
           await this.volumes.load();
         } else if (name === 'images') {
           await this.images.load();
+          const mgmt = (this.info && this.info.image_mgmt) || {};
+          this.images.canBuild = !!mgmt.build;
+          this.images.canDelete = mgmt.delete !== false;
         } else if (name === 'templates') {
           await this.templates.load();
         } else if (name === 'events') {
@@ -603,6 +644,8 @@ function shell() {
           p(() => this.run.load());
         } else if (name === 'volumes') {
           p(() => this.volumes.load());
+        } else if (name === 'images') {
+          p(() => this.images.load());
         }
       }, POLL_MS);
     },

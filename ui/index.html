@@ -398,17 +398,77 @@
 
       <!-- ── 镜像 ── -->
       <section x-show="route.name === 'images'">
-        <h2>镜像</h2>
+        <div class="head-row">
+          <h2>镜像</h2>
+          <div class="spacer"></div>
+          <button class="ghost" @click="images.load()">刷新</button>
+          <button class="primary" @click="images.buildOpen = true" x-show="images.canBuild">制作镜像</button>
+        </div>
+
+        <div class="card muted" x-show="!images.canBuild">
+          制作镜像未开启（这是宿主 root 级操作：chroot + apt 的 maintainer script 以 root 跑）。
+          要开：设 <code>BERTH_ALLOW_IMAGE_BUILD=1</code> 后重启 daemon。
+        </div>
+
+        <div class="card" x-show="images.buildOpen">
+          <h3>制作镜像</h3>
+          <div class="form-grid">
+            <label>名字<input name="imgName" x-model="images.form.name" placeholder="myimg（小写字母/数字/短横线）"></label>
+            <label>基础镜像
+              <select name="imgBase" x-model="images.form.base">
+                <template x-for="i in (info?.images || {})" :key="i"><option :value="i" x-text="i"></option></template>
+              </select>
+            </label>
+            <label>apt 包（空格分隔）<input name="imgPackages" x-model="images.form.packages" placeholder="jq ripgrep"></label>
+            <label>pip 包（空格分隔）<input name="imgPip" x-model="images.form.pip" placeholder="httpx==0.27"></label>
+          </div>
+          <label>自定义命令（一行一条，在 chroot 里执行）<textarea name="imgCommands" x-model="images.form.commands" rows="3" placeholder="ln -s /opt/app /usr/local/app"></textarea></label>
+          <label class="inline"><input type="checkbox" name="imgForce" x-model="images.form.force"> 目标已存在时重建</label>
+          <div class="actions">
+            <button class="primary" @click="images.submitBuild()">开始制作</button>
+            <button class="ghost" @click="images.buildOpen = false">取消</button>
+          </div>
+        </div>
+
         <table class="table" x-show="images.rows.length">
-          <thead><tr><th>名字</th><th>路径</th><th>大小</th></tr></thead>
+          <thead><tr><th>名字</th><th>路径</th><th>大小</th><th>使用中</th><th>操作</th></tr></thead>
           <tbody>
             <template x-for="i in images.rows" :key="i.name">
-              <tr><td class="mono" x-text="i.name"></td><td class="mono small" x-text="i.path"></td><td x-text="human(i.size_bytes)"></td></tr>
+              <tr>
+                <td class="mono" x-text="i.name"></td>
+                <td class="mono small" x-text="i.path"></td>
+                <td x-text="human(i.size_bytes)"></td>
+                <td class="small"><template x-for="s in (i.in_use_by || [])" :key="s"><span class="tag" x-text="s"></span></template></td>
+                <td class="row-actions">
+                  <button class="ghost sm" x-show="i.deletable && images.canDelete" @click="images.remove(i)">删除</button>
+                  <span class="muted small" x-show="i.is_base">基础镜像</span>
+                  <span class="muted small" x-show="!i.deletable && !i.is_base">占用中</span>
+                </td>
+              </tr>
             </template>
           </tbody>
         </table>
+
+        <div class="card" x-show="images.builds.length">
+          <h3>构建记录</h3>
+          <table class="table">
+            <thead><tr><th>build_id</th><th>镜像</th><th>状态</th><th>时间</th><th>输出</th></tr></thead>
+            <tbody>
+              <template x-for="b in images.builds" :key="b.id">
+                <tr>
+                  <td class="mono small" x-text="b.id"></td>
+                  <td class="mono" x-text="b.name"></td>
+                  <td><span class="badge" :class="b.status === 'success' ? 'running' : (b.status === 'building' ? 'starting' : 'crashed')" x-text="b.status"></span></td>
+                  <td class="small mono" x-text="b.created_at"></td>
+                  <td class="small mono" x-text="(b.log || b.error || '').slice(-200)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
         <div class="card muted">
-          镜像是预构建的 rootfs 目录（overlayfs 的只读下层）。构建：
+          镜像是预构建的 rootfs 目录（overlayfs 的只读下层）。用脚本批量构建：
           <code>sudo scripts/setup_rootfs.sh --with-redis --with-mysql --with-postgres --with-runner</code>
         </div>
       </section>

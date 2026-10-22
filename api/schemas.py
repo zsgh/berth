@@ -123,6 +123,17 @@ class RunRequest(BaseModel):
         return NetworkPolicy(**self.network)
 
 
+class ImageBuildRequest(BaseModel):
+    """POST /images 请求体：制作一个沙箱镜像（rootfs-<name>）。"""
+
+    name: str = Field(..., description="镜像名（小写字母/数字/点/短横线，1-32 字符）")
+    base: str = Field("base", description="从哪个镜像复制（默认 base）")
+    packages: list[str] = Field(default_factory=list, description="apt 安装的包")
+    pip_packages: list[str] = Field(default_factory=list, description="pip 安装的包")
+    commands: list[str] = Field(default_factory=list, description="在 chroot 里执行的命令")
+    force: bool = Field(False, description="目标已存在时重建")
+
+
 class EnsureRequest(BaseModel):
     """PUT /services/{ref} 请求体（名字在路径里）。"""
 

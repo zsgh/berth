@@ -15,6 +15,8 @@
 | `BERTH_UI_ENABLED` | `1` | 是否托管 `/ui` 静态页面 |
 | `BERTH_UI_DIR` | `<仓库>/ui` | UI 静态目录 |
 | `BERTH_EVENTS_ENABLED` | `1` | 是否记录操作审计（`/events`） |
+| `BERTH_ALLOW_IMAGE_BUILD` | `0` | 是否允许**制作**镜像（宿主 root 级操作，默认关） |
+| `BERTH_ALLOW_IMAGE_DELETE` | `1` | 是否允许**删除**镜像（默认开） |
 """
 from __future__ import annotations
 
@@ -100,6 +102,27 @@ def ui_dir() -> Path:
 
 def events_enabled() -> bool:
     return (os.environ.get("BERTH_EVENTS_ENABLED") or "1").strip().lower() not in ("0", "false", "no")
+
+
+def _flag(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+def allow_image_build() -> bool:
+    """是否允许**制作**镜像（默认关）。
+
+    制作镜像 = 在宿主上以 root 跑 chroot + apt（maintainer script 也是 root），
+    权限比 berth 其它接口高一档，所以要显式开。
+    """
+    return _flag("BERTH_ALLOW_IMAGE_BUILD", False)
+
+
+def allow_image_delete() -> bool:
+    """是否允许**删除**镜像（默认开；路径有强校验，只删 berth 自己管的目录）。"""
+    return _flag("BERTH_ALLOW_IMAGE_DELETE", True)
 
 
 def limits() -> dict:

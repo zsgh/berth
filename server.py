@@ -56,7 +56,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import actor_of, require_auth
-from api.schemas import EnsureRequest, RunRequest
+from api.schemas import EnsureRequest, ImageBuildRequest, RunRequest
 from sandbox import config
 from sandbox.files import (
     file_tree,
@@ -70,7 +70,7 @@ from sandbox.files import (
 )
 from sandbox.images import available_images
 from sandbox.overlayfs import run_script
-from sandbox.paths import BASE_DIR, dir_size
+from sandbox.paths import BASE_DIR, ROOTFS, dir_size
 from sandbox.paths import sudo as sudo_rm
 from sandbox.service import (
     ServiceConflictError,
@@ -623,11 +623,19 @@ def system_info() -> dict:
     from sandbox.network import network_capabilities
 
     images = available_images()
+    from sandbox.images import managed_images
+
     return {
         "version": VERSION,
         "limits": config.limits(),
         "mount_roots": [str(p) for p in allowed_roots()],
         "images": images,
+        "image_mgmt": {
+            "build": config.allow_image_build(),
+            "delete": config.allow_image_delete(),
+            "managed": sorted(managed_images()),
+            "note": "制作镜像是宿主 root 级操作（chroot + apt），默认关闭",
+        },
         "templates": list_templates(),
         "network": network_capabilities(),
         "auth": {"enabled": bool(config.token()), "scheme": "Bearer"},
@@ -725,12 +733,85 @@ def _host_stats() -> dict:
 
 @api.get("/images")
 def images_list() -> list[dict]:
-    """已发现的镜像（只读）。"""
+    """已发现的镜像（只读视图 + 管理信息）。"""
+    from sandbox.images import images_in_use, managed_images
+
+    managed = managed_images()
+    in_use = images_in_use()
     out = []
     for name, path in sorted(available_images().items()):
-        # 目录实际占用（du -sb）；不能用 shutil.disk_usage —— 那是整个盘的用量
-        out.append({"name": name, "path": path, "size_bytes": dir_size(path)})
+        out.append(
+            {
+                "name": name,
+                "path": path,
+                # 目录实际占用（du -sb）；不能用 shutil.disk_usage —— 那是整个盘的用量
+                "size_bytes": dir_size(path),
+                "managed": name in managed,          # 是否归 berth 管（可删）
+                "deletable": name in managed and name not in in_use,
+                "in_use_by": in_use.get(name, []),   # 哪些服务在用
+                "is_base": path == str(Path(ROOTFS)),
+            }
+        )
     return out
+
+
+@api.post("/images", status_code=202)
+def images_build(req: ImageBuildRequest) -> dict:
+    """**制作**一个沙箱镜像（后台跑，立即返回 build id）。
+
+    这是宿主 root 级操作（chroot + apt），默认关闭：
+    要开得设 `BERTH_ALLOW_IMAGE_BUILD=1` 并重启 daemon。
+    """
+    from sandbox.images import start_image_build
+
+    try:
+        return start_image_build(
+            name=req.name,
+            base=req.base,
+            packages=req.packages,
+            pip_packages=req.pip_packages,
+            commands=req.commands,
+            force=req.force,
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@api.get("/images/builds")
+def images_builds(limit: int = Query(50, ge=1, le=500)) -> list[dict]:
+    """镜像构建记录（最近的）。"""
+    from state.db import list_image_builds
+
+    return list_image_builds(limit=limit)
+
+
+@api.get("/images/builds/{build_id}")
+def images_build_get(build_id: str) -> dict:
+    """某个构建的状态 + 输出日志。"""
+    from state.db import get_image_build
+
+    build = get_image_build(build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail=f"没有这个构建: {build_id}")
+    return build
+
+
+@api.delete("/images/{name}")
+def images_delete(name: str) -> dict:
+    """**删除**一个镜像（只删 berth 自己管的 rootfs-* 目录）。
+
+    拒绝：base 镜像、正被服务使用的镜像、构建中的镜像。
+    """
+    from sandbox.images import delete_image
+
+    try:
+        return delete_image(name)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @api.get("/templates")

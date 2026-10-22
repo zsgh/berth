@@ -117,6 +117,21 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_services_name ON services(name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_builds (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                status     TEXT NOT NULL,   -- building/success/failed/cancelled
+                spec       TEXT,            -- JSON：构建参数
+                log        TEXT,            -- 构建输出（尾部）
+                image_path TEXT,
+                error      TEXT,
+                created_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            """
+        )
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -482,6 +497,64 @@ def list_events(limit: int = 100, action: str | None = None, target: str | None 
     for r in rows:
         d = dict(r)
         d["detail"] = _load_json(d.get("detail"), None)
+        out.append(d)
+    return out
+
+
+# ─────────────────────────── image_builds（镜像制作） ───────────────────────────
+
+
+def record_image_build(build_id: str, name: str, spec: dict) -> None:
+    """登记一次镜像构建（status=building）。"""
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO image_builds (id, name, status, spec, log, created_at) "
+            "VALUES (?, ?, 'building', ?, '', ?)",
+            (build_id, name, _dump_json(spec), _now()),
+        )
+    conn.close()
+
+
+def update_image_build(build_id: str, **fields) -> None:
+    """更新构建状态 / 日志。"""
+    if not fields:
+        return
+    for key in ("spec",):
+        if key in fields and not isinstance(fields[key], str):
+            fields[key] = _dump_json(fields[key])
+    if fields.get("status") in ("success", "failed", "cancelled"):
+        fields.setdefault("finished_at", _now())
+    cols = ", ".join(f"{k}=?" for k in fields)
+    conn = connect()
+    with conn:
+        conn.execute(
+            f"UPDATE image_builds SET {cols} WHERE id=?", (*fields.values(), build_id)
+        )
+    conn.close()
+
+
+def get_image_build(build_id: str) -> dict | None:
+    conn = connect()
+    row = conn.execute("SELECT * FROM image_builds WHERE id=?", (build_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["spec"] = _load_json(d.get("spec"), {})
+    return d
+
+
+def list_image_builds(limit: int = 50) -> list[dict]:
+    conn = connect()
+    rows = conn.execute(
+        "SELECT * FROM image_builds ORDER BY created_at DESC LIMIT ?", (max(1, int(limit)),)
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["spec"] = _load_json(d.get("spec"), {})
         out.append(d)
     return out
 
