@@ -593,14 +593,24 @@ def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
     可选：`overrides`（env/args/resources/ports 覆盖）、`init`（健康检查后执行）、
     `labels`（标签）、`spec`（内联模板，起被测服务用）。
     """
-    if not req.template and not req.spec:
-        raise HTTPException(status_code=400, detail="必须给 template（模板名）或 spec（内联模板）")
-    # 已存在但在作用域外 → 404（不泄露存在性）
     from sandbox.service import resolve_ref
 
     existing = resolve_ref(ref)
     if existing is not None:
         forbid_out_of_scope(request, existing.get("labels"), "服务", modify=True)
+    if not req.template and not req.spec:
+        if existing is None:
+            raise HTTPException(
+                status_code=400, detail="必须给 template（模板名）或 spec（内联模板）"
+            )
+        # 已存在 + 只给了 labels → 只更新标签（比如把服务标成共享）
+        if req.labels:
+            forbid_shared_create(request, req.labels)
+            from state.db import update_service
+
+            new_labels = {**(existing.get("labels") or {}), **scoped_labels(request, req.labels)}
+            update_service(existing["service_id"], labels=json.dumps(new_labels, ensure_ascii=False))
+        return get_service(existing["service_id"])
     forbid_shared_create(request, req.labels)
     try:
         return start_service(
