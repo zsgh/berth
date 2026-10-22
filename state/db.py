@@ -36,6 +36,7 @@ def _now() -> str:
 MIGRATIONS: dict[str, dict[str, str]] = {
     "runs": {
         "owner": "TEXT",        # 归属的 user；NULL = 全局共享
+        "memory_mb": "INTEGER", # 内存限额（配额统计用）
         "status": "TEXT DEFAULT 'finished'",   # running/finished/timeout/killed/error
         "image": "TEXT",
         "network": "TEXT",                      # JSON：网络策略
@@ -312,8 +313,8 @@ def record_run(task_id: str, code: str, result: dict) -> None:
             INSERT INTO runs (task_id, code, stdout, stderr, exit_code, duration_ms,
                               artifacts, created_at, finished_at,
                               status, image, network, labels, timeout, started_at, updated_at,
-                              owner)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              owner, memory_mb)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 code=excluded.code, stdout=excluded.stdout, stderr=excluded.stderr,
                 exit_code=excluded.exit_code, duration_ms=excluded.duration_ms,
@@ -322,7 +323,7 @@ def record_run(task_id: str, code: str, result: dict) -> None:
                 status=excluded.status, image=excluded.image, network=excluded.network,
                 labels=excluded.labels, timeout=excluded.timeout,
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
-                owner=excluded.owner
+                owner=excluded.owner, memory_mb=excluded.memory_mb
             """,
             (
                 task_id,
@@ -341,6 +342,7 @@ def record_run(task_id: str, code: str, result: dict) -> None:
                 result.get("started_at") or created_at,
                 _now(),
                 result.get("owner"),
+                result.get("memory_mb"),
             ),
         )
     conn.close()

@@ -14,6 +14,7 @@
 #   sudo scripts/berth_admin.sh users                 # 列出 user（租户/项目）
 #   sudo scripts/berth_admin.sh adduser acme --quota-runs 10
 #   sudo scripts/berth_admin.sh share mysql           # 把服务设为"全局共享"（人人可见、只读）
+#   sudo scripts/berth_admin.sh dedicated-user berth  # 把 daemon 迁到专用系统用户下（多租户建议）
 #   sudo scripts/berth_admin.sh rotate                # 轮换超级管理员令牌（旧的保留 5 分钟）
 #   sudo scripts/berth_admin.sh logs                  # 看 daemon 日志
 #
@@ -222,6 +223,64 @@ cmd_tls_off() {
   info "证书还留着：$TLS_CRT（要再开回来跑 $0 tls）"
 }
 
+# ─────────────────────────── 专用用户（M4） ───────────────────────────
+
+# 把 daemon 挪到专用系统用户下跑（多租户/公网部署建议做）：
+#   - /var/lib/berth 只归它 → 别的用户读不到状态库、令牌文件
+#   - 免密 sudo 只给必要的三条
+#   - venv 必须是**独立**的（--system-site-packages 建的会在换用户后
+#     import 到系统的老版本 pydantic）
+cmd_dedicated_user() {
+  need_root dedicated-user
+  local u="${1:-berth}"
+  echo "把 daemon 迁到专用用户 $u …"
+
+  if ! id "$u" >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/berth --shell /usr/sbin/nologin "$u" && info "已建系统用户 $u"
+  fi
+
+  # 代码目录要能读+执行
+  chown -R root:root "$REPO_DIR" 2>/dev/null || true
+  chmod -R a+rX "$REPO_DIR" 2>/dev/null || true
+  chmod a+x "$REPO_DIR/.venv/bin" 2>/dev/null || true
+  chmod -R a+rX "$REPO_DIR/.venv" 2>/dev/null || true
+
+  # 独立的 venv（不继承系统 site-packages）
+  if [[ ! -x "$REPO_DIR/.venv/bin/python" ]] || ! "$REPO_DIR/.venv/bin/python" -c "import pydantic" 2>/dev/null; then
+    info "建独立 venv …"
+    rm -rf "$REPO_DIR/.venv"
+    sudo -u "$u" python3 -m venv "$REPO_DIR/.venv" 2>/dev/null || python3 -m venv "$REPO_DIR/.venv"
+    "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt"
+  fi
+
+  # 数据目录
+  mkdir -p /var/lib/berth
+  chown -R "$u:$u" /var/lib/berth
+  chmod 700 /var/lib/berth
+
+  # 免密 sudo：只给必要的三条
+  cat > /etc/sudoers.d/berth <<SUDO
+$u ALL=(root) NOPASSWD: /usr/bin/systemd-run, /usr/bin/systemctl, /usr/bin/chown, /usr/bin/rm, /usr/bin/ip, /usr/bin/tee, /usr/bin/sh
+SUDO
+  chmod 440 /etc/sudoers.d/berth
+  info "sudoers: /etc/sudoers.d/berth"
+
+  # 单元改成用这个用户
+  RUN_USER="$u"
+  write_unit
+  systemctl daemon-reload
+  systemctl restart "$SVC"
+  sleep 3
+  if systemctl is-active --quiet "$SVC"; then
+    info "已迁移到专用用户 $u，daemon 正常"
+  else
+    echo "启动失败，日志：" >&2
+    journalctl -u "$SVC" -n 20 --no-pager >&2
+    exit 1
+  fi
+  info "回退：BERTH_USER=<原用户> sudo $0 setup"
+}
+
 # ─────────────────────────── status ───────────────────────────
 
 cmd_status() {
@@ -371,6 +430,7 @@ case "${1:-}" in
   users) shift; cmd_users "$@" ;;
   adduser) shift; cmd_adduser "$@" ;;
   share) shift; cmd_share "$@" ;;
+  dedicated-user) shift; cmd_dedicated_user "$@" ;;
   rotate) shift; cmd_rotate "$@" ;;
   logs) shift; cmd_logs "$@" ;;
   -h|--help|help|"") usage 0 ;;

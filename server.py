@@ -303,8 +303,15 @@ def scripts_run(req: RunRequest, request: Request) -> dict:
     )
     # 沙箱跑在 owner 的 netns 里（同 user 的服务同 ns → 127.0.0.1 互通；跨 user 不通）
     from sandbox import netns as netns_mod
+    from sandbox.quotas import QuotaExceeded, check_run
 
-    kwargs["netns"] = netns_mod.netns_for_user(kwargs.get("owner"))
+    owner = kwargs.get("owner")
+    try:
+        check_run(owner, req.memory_mb)
+    except QuotaExceeded as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
+    kwargs["netns"] = netns_mod.netns_for_user(owner)
     try:
         if req.async_:
             return runs_mod.start_async(**kwargs)
@@ -616,10 +623,16 @@ def services_ensure(request: Request, ref: str, req: EnsureRequest) -> dict:
     `labels`（标签）、`spec`（内联模板，起被测服务用）。
     """
     from sandbox.service import resolve_ref
+    from sandbox.quotas import QuotaExceeded, check_service
 
     existing = resolve_ref(ref)
     if existing is not None:
         forbid_out_of_scope(request, existing.get("owner"), "服务", modify=True)
+    else:
+        try:
+            check_service(owner_for(request, req.owner))
+        except QuotaExceeded as e:
+            raise HTTPException(status_code=429, detail=str(e))
     if not req.template and not req.spec:
         if existing is None:
             raise HTTPException(
@@ -837,6 +850,14 @@ def system_info(request: Request) -> dict:
         "ui": {"enabled": config.ui_enabled(), "path": "/ui/"},
         "home": str(BASE_DIR),
     }
+
+
+@api.get("/system/capacity")
+def system_capacity() -> dict:
+    """节点容量（给平台调度用）：CPU / 内存 / 磁盘 / 并发余量 / 镜像清单。"""
+    from sandbox.quotas import capacity
+
+    return capacity()
 
 
 @api.get("/system/stats")

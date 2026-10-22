@@ -464,6 +464,7 @@ def wait_run(prepared: PreparedRun, proc: subprocess.Popen, timeout: int | None 
         "network": prepared.network,
         "labels": prepared.labels,
         "owner": prepared.owner,
+        "memory_mb": prepared.memory_mb,
         "timeout": timeout,
         "started_at": prepared.started_at,
     }
